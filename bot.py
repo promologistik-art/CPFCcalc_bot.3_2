@@ -9,7 +9,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
-from config import BOT_TOKEN, ADMIN_ID, ADMIN_USERNAME, ADMIN_CONTACT, TRIAL_DAYS, SUBSCRIPTION_PRICE, ACTIVITY_LEVELS
+from config import BOT_TOKEN, ADMIN_ID, ADMIN_USERNAME, ADMIN_CONTACT, TRIAL_DAYS, SUBSCRIPTION_PRICE, ACTIVITY_LEVELS, OPENAI_MODEL
 from food_search import FoodSearch
 from db import UserDB
 from export import export_users_to_excel, export_user_meals_to_excel
@@ -716,7 +716,8 @@ async def cmd_profile(message: types.Message, state: FSMContext):
             f"Активность: {activity_name}\n\n"
             f"Базовый метаболизм (BMR): {bmr:.0f} ккал\n"
             f"Суточная норма (TDEE): {tdee:.0f} ккал\n\n"
-            f"Изменить: /profile_edit"
+            f"📥 Экспортировать историю: /export\n"
+            f"✏️ Изменить: /profile_edit"
         )
     else:
         await message.answer("Давайте познакомимся!\n\nКак вас зовут?")
@@ -787,7 +788,8 @@ async def process_profile_activity(callback: types.CallbackQuery, state: FSMCont
         f"Возраст: {data['age']} лет\n"
         f"Вес: {data['weight']} кг\n"
         f"Рост: {data['height']} см\n"
-        f"Суточная норма: {tdee:.0f} ккал"
+        f"Суточная норма: {tdee:.0f} ккал\n\n"
+        f"📥 Экспортировать историю: /export"
     )
     await state.clear()
     await callback.answer()
@@ -829,7 +831,8 @@ async def cmd_start(message: types.Message, state: FSMContext):
         f"📊 Если заполнишь профиль — покажу процент от дневной нормы.\n\n"
         f"✨ {sub_status}\n\n"
         f"🎤 Можешь записать голосовое сообщение\n"
-        f"🖼️ Или отправить фото еды\n\n"
+        f"🖼️ Или отправить фото еды\n"
+        f"📥 Экспорт истории: /export\n\n"
         f"Попробуй прямо сейчас: «гречка 150г, отварная куриная грудка 150 грамм, салат из огурцов и томатов с оливковым маслом 150 грамм»"
     )
     
@@ -876,7 +879,10 @@ async def cmd_stats(message: types.Message):
     profile = user_db.get_profile(message.from_user.id)
     tdee = user_db.calculate_tdee(profile) if profile else None
     
-    await message.answer(format_daily_stats(stats, tdee))
+    response = format_daily_stats(stats, tdee)
+    response += "\n\n📥 Экспортировать историю: /export"
+    
+    await message.answer(response)
 
 @dp.message(Command("history"))
 async def cmd_history(message: types.Message):
@@ -893,6 +899,9 @@ async def cmd_history(message: types.Message):
     for meal in meals:
         weight = meal.get("weight_grams", 0)
         text += f"{meal['product_name']} - {weight}г — {meal['calories']:.0f} ккал\n"
+    
+    text += "\n📥 Скачать всё в Excel: /export"
+    
     await message.answer(text)
 
 @dp.message(Command("clear"))
@@ -978,85 +987,6 @@ async def handle_confirmation_callback(callback: types.CallbackQuery, state: FSM
     
     await callback.answer()
 
-# ============ ОБРАБОТЧИК КОРРЕКЦИИ ============
-
-@dp.message(WaitingState.waiting_for_correction)
-async def handle_correction(message: types.Message, state: FSMContext):
-    if not message.text:
-        return
-    
-    user_text = message.text.strip()
-    user_text_lower = user_text.lower()
-    data = await state.get_data()
-    original_products = data.get("original_products", [])
-    
-    if is_affirmative(user_text_lower):
-        for p in original_products:
-            product_data = extract_product_data(p)
-            user_db.add_meal(message.from_user.id, product_data)
-        
-        stats = user_db.get_today_stats(message.from_user.id)
-        profile = user_db.get_profile(message.from_user.id)
-        tdee = user_db.calculate_tdee(profile) if profile else None
-        
-        response = f"Сохранено!\n\n{format_daily_stats(stats, tdee)}"
-        
-        if not has_profile(message.from_user.id):
-            response += "\n\nИспользуйте /profile для настройки нормы."
-        
-        await message.answer(response)
-        await state.clear()
-        return
-    
-    if is_negative(user_text_lower) and not is_correction(user_text_lower):
-        await message.answer("Напишите правильные данные или 'удали X' для удаления продукта.")
-        return
-    
-    if is_delete_command(user_text_lower):
-        words_to_delete = re.findall(r'[\w]+', user_text.replace("удали", "").replace("убрать", "").replace("удалить", ""))
-        if words_to_delete:
-            to_delete = words_to_delete[0]
-            new_products = [p for p in original_products if to_delete not in p.get("name", "").lower()]
-            
-            if len(new_products) == len(original_products):
-                await message.answer(f"Не найден продукт '{to_delete}' для удаления.")
-                return
-            
-            total = {"calories": 0, "protein": 0, "fat": 0, "carbs": 0}
-            for p in new_products:
-                for key in total:
-                    total[key] += p.get(key, 0)
-            
-            lines = []
-            for p in new_products:
-                lines.append(f"{p.get('name', '')} - {p.get('weight_grams', 0)}г, К {p.get('calories', 0):.0f}")
-            
-            result_text = "Обновлено:\n\n" + "\n".join(lines)
-            result_text += f"\n\nИТОГО: {total['calories']:.0f} ккал\n\nЗаписываю?"
-            
-            await state.update_data(original_products=new_products)
-            await message.answer(result_text, reply_markup=get_confirmation_keyboard())
-        return
-    
-    if user_text.startswith('/'):
-        await state.clear()
-        await handle_message(message, state)
-        return
-    
-    if is_correction(user_text_lower):
-        waiting_msg = await message.answer("Пересчитываю...")
-        result = await food_search.parse_and_calculate(user_text)
-        await waiting_msg.delete()
-        
-        if result["success"] and result["data"].get("products"):
-            await state.update_data(original_products=result["data"]["products"])
-            await show_result(message, state, result, user_text)
-        else:
-            await message.answer("Не удалось распознать. Попробуйте: борщ 300г")
-        return
-    
-    await message.answer("Не понял. Напишите новые данные или нажмите кнопки выше.")
-
 # ============ ГОЛОСОВЫЕ СООБЩЕНИЯ ============
 
 @dp.message(lambda message: message.voice)
@@ -1139,7 +1069,86 @@ async def handle_photo(message: types.Message, state: FSMContext):
         await wait_msg.delete()
         await message.answer("Ошибка обработки фото. Попробуйте текстом.")
 
-# ============ ОСНОВНОЙ ОБРАБОТЧИК ============
+# ============ ОБРАБОТЧИК КОРРЕКЦИИ ============
+
+@dp.message(WaitingState.waiting_for_correction)
+async def handle_correction(message: types.Message, state: FSMContext):
+    if not message.text:
+        return
+    
+    user_text = message.text.strip()
+    user_text_lower = user_text.lower()
+    data = await state.get_data()
+    original_products = data.get("original_products", [])
+    
+    if is_affirmative(user_text_lower):
+        for p in original_products:
+            product_data = extract_product_data(p)
+            user_db.add_meal(message.from_user.id, product_data)
+        
+        stats = user_db.get_today_stats(message.from_user.id)
+        profile = user_db.get_profile(message.from_user.id)
+        tdee = user_db.calculate_tdee(profile) if profile else None
+        
+        response = f"Сохранено!\n\n{format_daily_stats(stats, tdee)}"
+        
+        if not has_profile(message.from_user.id):
+            response += "\n\nИспользуйте /profile для настройки нормы."
+        
+        await message.answer(response)
+        await state.clear()
+        return
+    
+    if is_negative(user_text_lower) and not is_correction(user_text_lower):
+        await message.answer("Напишите правильные данные или 'удали X' для удаления продукта.")
+        return
+    
+    if is_delete_command(user_text_lower):
+        words_to_delete = re.findall(r'[\w]+', user_text.replace("удали", "").replace("убрать", "").replace("удалить", ""))
+        if words_to_delete:
+            to_delete = words_to_delete[0]
+            new_products = [p for p in original_products if to_delete not in p.get("name", "").lower()]
+            
+            if len(new_products) == len(original_products):
+                await message.answer(f"Не найден продукт '{to_delete}' для удаления.")
+                return
+            
+            total = {"calories": 0, "protein": 0, "fat": 0, "carbs": 0}
+            for p in new_products:
+                for key in total:
+                    total[key] += p.get(key, 0)
+            
+            lines = []
+            for p in new_products:
+                lines.append(f"{p.get('name', '')} - {p.get('weight_grams', 0)}г, К {p.get('calories', 0):.0f}")
+            
+            result_text = "Обновлено:\n\n" + "\n".join(lines)
+            result_text += f"\n\nИТОГО: {total['calories']:.0f} ккал\n\nЗаписываю?"
+            
+            await state.update_data(original_products=new_products)
+            await message.answer(result_text, reply_markup=get_confirmation_keyboard())
+        return
+    
+    if user_text.startswith('/'):
+        await state.clear()
+        await handle_message(message, state)
+        return
+    
+    if is_correction(user_text_lower):
+        waiting_msg = await message.answer("Пересчитываю...")
+        result = await food_search.parse_and_calculate(user_text)
+        await waiting_msg.delete()
+        
+        if result["success"] and result["data"].get("products"):
+            await state.update_data(original_products=result["data"]["products"])
+            await show_result(message, state, result, user_text)
+        else:
+            await message.answer("Не удалось распознать. Попробуйте: борщ 300г")
+        return
+    
+    await message.answer("Не понял. Напишите новые данные или нажмите кнопки выше.")
+
+# ============ ОСНОВНОЙ ОБРАБОТЧИК (ТОЛЬКО ТЕКСТ) ============
 
 @dp.message(lambda message: message.text)
 async def handle_message(message: types.Message, state: FSMContext):
@@ -1179,7 +1188,6 @@ async def main():
     
     await set_bot_commands()
     
-    # Запускаем планировщик отчётов
     report_scheduler = ReportScheduler(bot, user_db, lambda uid: generate_daily_report(uid, user_db))
     await report_scheduler.start()
     
