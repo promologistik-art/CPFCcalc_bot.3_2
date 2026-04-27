@@ -12,13 +12,18 @@ from aiogram.fsm.state import State, StatesGroup
 from config import BOT_TOKEN, ADMIN_ID, ADMIN_USERNAME, ADMIN_CONTACT, TRIAL_DAYS, SUBSCRIPTION_PRICE, ACTIVITY_LEVELS
 from food_search import FoodSearch
 from db import UserDB
-from export import export_users_to_excel
+from export import export_users_to_excel, export_user_meals_to_excel
+from report_scheduler import ReportScheduler, generate_daily_report
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 food_search = FoodSearch()
 user_db = UserDB()
+
+report_scheduler = None
 
 # ============ СОСТОЯНИЯ ============
 
@@ -73,6 +78,7 @@ async def set_bot_commands():
         BotCommand(command="profile", description="Мой профиль"),
         BotCommand(command="profile_edit", description="Изменить профиль"),
         BotCommand(command="subscription", description="Статус подписки"),
+        BotCommand(command="export", description="Экспорт в Excel 📥"),
         BotCommand(command="help", description="Помощь"),
         BotCommand(command="admin_panel", description="Админ-панель"),
     ]
@@ -93,11 +99,10 @@ def is_admin(user_id: int, username: str = None) -> bool:
     return False
 
 def get_gender_keyboard():
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+    return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Мужской", callback_data="gender_male"),
          InlineKeyboardButton(text="Женский", callback_data="gender_female")]
     ])
-    return keyboard
 
 def get_activity_keyboard():
     buttons = []
@@ -154,13 +159,41 @@ async def get_user_id_or_username(user_input: str) -> int:
         return user_db.get_user_id_by_username(user_input)
 
 def format_date(date_str: str) -> str:
-    """Преобразует YYYY-MM-DD в DD.MM.YYYY"""
     if not date_str:
         return date_str
     parts = date_str[:10].split('-')
     if len(parts) == 3:
         return f"{parts[2]}.{parts[1]}.{parts[0]}"
     return date_str[:10]
+
+async def show_result(message: types.Message, state: FSMContext, result: dict, source_text: str = None):
+    data = result["data"]
+    products = data.get("products", [])
+    user_text = result.get("user_text", "")
+    
+    await state.set_state(WaitingState.waiting_for_correction)
+    await state.update_data(original_products=products, original_message=source_text or message.text)
+    
+    if user_text:
+        full_text = user_text + "\n\nЗаписываю?"
+    else:
+        lines = []
+        for p in products:
+            name = p.get("name", "")
+            weight = p.get("weight_grams", 0)
+            cal = p.get("calories", 0)
+            prot = p.get("protein", 0)
+            fat = p.get("fat", 0)
+            carbs = p.get("carbs", 0)
+            lines.append(f"{name} - {weight}г, К {cal:.0f}, Б {prot:.1f}, Ж {fat:.1f}, У {carbs:.1f}")
+        
+        total = data.get("total", {})
+        result_text = "\n".join(lines)
+        result_text += f"\n\nИТОГО: {total.get('calories', 0):.0f} ккал | Б: {total.get('protein', 0):.1f}г | Ж: {total.get('fat', 0):.1f}г | У: {total.get('carbs', 0):.1f}г"
+        result_text += "\n\nЗаписываю?"
+        full_text = result_text
+    
+    await message.answer(full_text, reply_markup=get_confirmation_keyboard())
 
 # ============ АДМИН-ПАНЕЛЬ ============
 
@@ -182,7 +215,7 @@ async def cmd_admin_panel(message: types.Message):
         "Рассылка:\n"
         "/broadcast_all текст — рассылка всем пользователям\n"
         "/broadcast_active текст — рассылка только активным\n"
-        "(или ответьте на сообщение командой /broadcast_all)\n\n"
+        "(или ответьте на сообщение командой)\n\n"
         "Бэкап:\n"
         "/backup — скачать базу данных users.db\n\n"
         "Реферальные команды:\n"
@@ -206,7 +239,6 @@ async def cmd_admin_export(message: types.Message):
     
     try:
         excel_data = export_users_to_excel(users)
-        
         filename = f"users_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         
         await message.answer_document(
@@ -246,10 +278,7 @@ async def cmd_broadcast_all(message: types.Message, state: FSMContext):
         await message.answer("Нет доступа")
         return
     
-    # Получаем текст после команды или из reply-to сообщения
     text = message.text.replace("/broadcast_all", "").strip()
-    
-    # Если текст не в команде, проверяем reply
     if not text and message.reply_to_message and message.reply_to_message.text:
         text = message.reply_to_message.text.strip()
     
@@ -278,10 +307,7 @@ async def cmd_broadcast_active(message: types.Message, state: FSMContext):
         await message.answer("Нет доступа")
         return
     
-    # Получаем текст после команды или из reply-to сообщения
     text = message.text.replace("/broadcast_active", "").strip()
-    
-    # Если текст не в команде, проверяем reply
     if not text and message.reply_to_message and message.reply_to_message.text:
         text = message.reply_to_message.text.strip()
     
@@ -315,7 +341,6 @@ async def process_broadcast(message: types.Message, state: FSMContext):
         data = await state.get_data()
         text = data.get("broadcast_text")
         users = data.get("broadcast_users")
-        broadcast_type = data.get("broadcast_type")
         
         await message.answer(f"Начинаю рассылку для {len(users)} пользователей...")
         
@@ -328,8 +353,7 @@ async def process_broadcast(message: types.Message, state: FSMContext):
                 success += 1
             except Exception as e:
                 failed += 1
-                logging.error(f"Ошибка отправки {user_id}: {e}")
-            
+                logger.error(f"Ошибка отправки {user_id}: {e}")
             await asyncio.sleep(0.05)
         
         await message.answer(
@@ -364,7 +388,7 @@ async def process_admin_user_id(message: types.Message, state: FSMContext):
         user_id = user_db.get_user_id_by_username(username)
     
     if not user_id:
-        await message.answer(f"Пользователь {user_input} не найден. Убедитесь, что он хотя бы раз написал боту /start")
+        await message.answer(f"Пользователь {user_input} не найден.")
         await state.clear()
         return
     
@@ -393,12 +417,9 @@ async def process_admin_days(message: types.Message, state: FSMContext):
         await state.clear()
         
         try:
-            await bot.send_message(
-                user_id,
-                "Вам выдана бессрочная подписка! Теперь вы можете пользоваться ботом без ограничений."
-            )
+            await bot.send_message(user_id, "Вам выдана бессрочная подписка!")
         except:
-            await message.answer("Не удалось отправить уведомление пользователю")
+            pass
             
     elif choice == "2":
         await message.answer("Введите количество дней (например: 30)")
@@ -422,15 +443,12 @@ async def process_admin_days_value(message: types.Message, state: FSMContext):
         await state.clear()
         
         try:
-            await bot.send_message(
-                user_id,
-                f"Вам выдана подписка на {days} дней! Теперь вы можете пользоваться ботом без ограничений.\n\nОсталось дней: {days}"
-            )
+            await bot.send_message(user_id, f"Вам выдана подписка на {days} дней!")
         except:
-            await message.answer("Не удалось отправить уведомление пользователю")
+            pass
             
     except ValueError:
-        await message.answer("Неверное количество дней. Введите число.")
+        await message.answer("Неверное количество дней.")
         await state.clear()
 
 @dp.message(Command("admin_remove_user"))
@@ -454,7 +472,7 @@ async def cmd_admin_remove_user(message: types.Message):
         user_name = user_info.get('first_name', f"ID {user_id}") if user_info else f"ID {user_id}"
         
         user_db.clear_all_user_data(user_id)
-        await message.answer(f"Пользователь {user_name} удалён. Все данные очищены.")
+        await message.answer(f"Пользователь {user_name} удалён.")
     except Exception as e:
         await message.answer(f"Ошибка: {e}")
 
@@ -480,20 +498,16 @@ async def cmd_admin_extend(message: types.Message):
         
         user_info = user_db.get_user_info(user_id)
         user_name = user_info.get('first_name', f"ID {user_id}") if user_info else f"ID {user_id}"
-        subscription = user_db.get_subscription_status(user_id)
         
         await message.answer(f"Подписка пользователя {user_name} продлена на {days} дней!")
         
         try:
-            await bot.send_message(
-                user_id,
-                f"Ваша подписка продлена на {days} дней!\n\nОсталось дней: {subscription['days_left']}"
-            )
+            await bot.send_message(user_id, f"Ваша подписка продлена на {days} дней!")
         except:
-            await message.answer("Не удалось отправить уведомление пользователю")
+            pass
             
     except ValueError:
-        await message.answer("Неверное количество дней. Введите число.")
+        await message.answer("Неверное количество дней.")
     except Exception as e:
         await message.answer(f"Ошибка: {e}")
 
@@ -604,15 +618,12 @@ async def cmd_admin_activate(message: types.Message):
         await message.answer(f"Подписка активирована для {user_name} на {days} дней")
         
         try:
-            await bot.send_message(
-                user_id,
-                f"Ваша подписка активирована на {days} дней!\n\nТеперь вы можете пользоваться ботом без ограничений.\nОсталось дней: {days}"
-            )
+            await bot.send_message(user_id, f"Ваша подписка активирована на {days} дней!")
         except:
-            await message.answer("Не удалось отправить уведомление пользователю")
+            pass
             
     except ValueError:
-        await message.answer("Неверное количество дней. Введите число.")
+        await message.answer("Неверное количество дней.")
     except Exception as e:
         await message.answer(f"Ошибка: {e}")
 
@@ -626,11 +637,7 @@ async def cmd_create_referral(message: types.Message):
     
     parts = message.text.split()
     if len(parts) < 4:
-        await message.answer(
-            "Использование: /ref @username процент месяцы\n\n"
-            "Пример: /ref @john 50 12\n"
-            "Пример: /ref @jane 20 1"
-        )
+        await message.answer("Использование: /ref @username процент месяцы\n\nПример: /ref @john 50 12")
         return
     
     username = parts[1].lstrip('@')
@@ -645,24 +652,11 @@ async def cmd_create_referral(message: types.Message):
         await message.answer("Процент должен быть от 0 до 100")
         return
     
-    if bonus_months < 0:
-        await message.answer("Количество месяцев не может быть отрицательным")
-        return
-    
     code = user_db.generate_referral_link(username, commission_percent, bonus_months)
     bot_info = await bot.get_me()
     link = f"https://t.me/{bot_info.username}?start={code}"
     
-    await message.answer(
-        f"Реферальная ссылка создана для @{username}\n\n"
-        f"Ссылка: {link}\n\n"
-        f"Условия:\n"
-        f"• Комиссия: {commission_percent}% от оплат\n"
-        f"• Бонус рефералу: {bonus_months} месяц(ев) бесплатной подписки\n\n"
-        f"При переходе по ссылке новый пользователь получит +3 дня к тестовому периоду.\n"
-        f"При оплате подписки рефералу начислится комиссия.\n\n"
-        f"Пользователь @{username} получит бонусные месяцы после первого запуска бота."
-    )
+    await message.answer(f"Реферальная ссылка создана для @{username}\n\nСсылка: {link}\n\nКомиссия: {commission_percent}%\nБонус: {bonus_months} мес")
 
 @dp.message(Command("ref_stats"))
 async def cmd_ref_stats(message: types.Message):
@@ -671,31 +665,14 @@ async def cmd_ref_stats(message: types.Message):
         return
     
     stats = user_db.get_referral_stats()
-    
     if not stats:
         await message.answer("Нет реферальных ссылок")
         return
     
     text = "Статистика рефералов:\n\n"
-    total_refs = 0
-    total_paid = 0
-    total_commission = 0
-    
     for i, s in enumerate(stats, 1):
         username = f"@{s['username']}" if s['username'] else s['first_name']
-        text += f"{i}. {username}\n"
-        text += f"   Комиссия: {s['commission_percent']}% | Бонус: {s['bonus_months']} мес\n"
-        text += f"   Привёл: {s['total_refs']} (оплатили: {s['paid_refs']})\n"
-        text += f"   Сумма к выплате: {s['total_commission']:.0f} ₽\n\n"
-        
-        total_refs += s['total_refs']
-        total_paid += s['paid_refs']
-        total_commission += s['total_commission']
-    
-    text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    text += f"Всего приведено: {total_refs}\n"
-    text += f"Всего оплатили: {total_paid}\n"
-    text += f"Общая сумма к выплате: {total_commission:.0f} ₽"
+        text += f"{i}. {username} — {s['total_refs']} реф. ({s['paid_refs']} оплат)\n"
     
     await message.answer(text)
 
@@ -710,27 +687,12 @@ async def cmd_ref_link_info(message: types.Message):
         await message.answer("Использование: /ref_link_info код_ссылки")
         return
     
-    code = parts[1]
-    info = user_db.get_referral_link_info(code)
-    
+    info = user_db.get_referral_link_info(parts[1])
     if not info:
-        await message.answer(f"Ссылка с кодом {code} не найдена")
+        await message.answer("Ссылка не найдена")
         return
     
-    username = f"@{info['username']}" if info['username'] else info['first_name']
-    bot_info = await bot.get_me()
-    
-    text = f"Информация о реферальной ссылке\n\n"
-    text += f"Ссылка: https://t.me/{bot_info.username}?start={code}\n"
-    text += f"Реферал: {username}\n"
-    text += f"Комиссия: {info['commission_percent']}%\n"
-    text += f"Бонус рефералу: {info['bonus_months']} мес\n"
-    text += f"Создана: {format_date(info['created_at'])}\n"
-    text += f"Статистика:\n"
-    text += f"   Переходов: {info['total_refs']}\n"
-    text += f"   Оплатили: {info['paid_refs']}"
-    
-    await message.answer(text)
+    await message.answer(f"Код: {info['code']}\nРеферал: @{info['username']}\nКомиссия: {info['commission_percent']}%\nПереходов: {info['total_refs']}")
 
 # ============ ПРОФИЛЬ ============
 
@@ -752,27 +714,23 @@ async def cmd_profile(message: types.Message, state: FSMContext):
             f"Возраст: {profile['age']} лет\n"
             f"Пол: {gender_text}\n"
             f"Активность: {activity_name}\n\n"
-            f"Расчёты:\n"
             f"Базовый метаболизм (BMR): {bmr:.0f} ккал\n"
             f"Суточная норма (TDEE): {tdee:.0f} ккал\n\n"
-            f"Чтобы изменить данные, используйте /profile_edit"
+            f"Изменить: /profile_edit"
         )
     else:
-        await message.answer(
-            "Давайте познакомимся!\n\n"
-            "Как вас зовут? (напишите имя)"
-        )
+        await message.answer("Давайте познакомимся!\n\nКак вас зовут?")
         await state.set_state(ProfileState.waiting_for_name)
 
 @dp.message(Command("profile_edit"))
 async def cmd_profile_edit(message: types.Message, state: FSMContext):
-    await message.answer("Как вас зовут? (напишите имя)")
+    await message.answer("Как вас зовут?")
     await state.set_state(ProfileState.waiting_for_name)
 
 @dp.message(ProfileState.waiting_for_name)
 async def process_profile_name(message: types.Message, state: FSMContext):
     await state.update_data(name=message.text.strip())
-    await message.answer("Сколько вам лет? (напишите число)")
+    await message.answer("Сколько вам лет?")
     await state.set_state(ProfileState.waiting_for_age)
 
 @dp.message(ProfileState.waiting_for_age)
@@ -780,20 +738,20 @@ async def process_profile_age(message: types.Message, state: FSMContext):
     try:
         age = int(message.text.strip())
         await state.update_data(age=age)
-        await message.answer("Ваш вес? (в кг, например: 75)")
+        await message.answer("Ваш вес? (в кг)")
         await state.set_state(ProfileState.waiting_for_weight)
     except ValueError:
-        await message.answer("Пожалуйста, введите число (например: 30)")
+        await message.answer("Пожалуйста, введите число")
 
 @dp.message(ProfileState.waiting_for_weight)
 async def process_profile_weight(message: types.Message, state: FSMContext):
     try:
         weight = float(message.text.strip().replace(',', '.'))
         await state.update_data(weight=weight)
-        await message.answer("Ваш рост? (в см, например: 175)")
+        await message.answer("Ваш рост? (в см)")
         await state.set_state(ProfileState.waiting_for_height)
     except ValueError:
-        await message.answer("Пожалуйста, введите число (например: 75.5)")
+        await message.answer("Пожалуйста, введите число")
 
 @dp.message(ProfileState.waiting_for_height)
 async def process_profile_height(message: types.Message, state: FSMContext):
@@ -803,13 +761,13 @@ async def process_profile_height(message: types.Message, state: FSMContext):
         await message.answer("Ваш пол?", reply_markup=get_gender_keyboard())
         await state.set_state(ProfileState.waiting_for_gender)
     except ValueError:
-        await message.answer("Пожалуйста, введите число (например: 175)")
+        await message.answer("Пожалуйста, введите число")
 
 @dp.callback_query(lambda c: c.data.startswith("gender_"))
 async def process_profile_gender(callback: types.CallbackQuery, state: FSMContext):
     gender = "male" if callback.data == "gender_male" else "female"
     await state.update_data(gender=gender)
-    await callback.message.edit_text("Ваш уровень физической активности?", reply_markup=get_activity_keyboard())
+    await callback.message.edit_text("Уровень физической активности?", reply_markup=get_activity_keyboard())
     await state.set_state(ProfileState.waiting_for_activity)
     await callback.answer()
 
@@ -829,9 +787,7 @@ async def process_profile_activity(callback: types.CallbackQuery, state: FSMCont
         f"Возраст: {data['age']} лет\n"
         f"Вес: {data['weight']} кг\n"
         f"Рост: {data['height']} см\n"
-        f"Активность: {ACTIVITY_LEVELS[activity_level]['name']}\n\n"
-        f"Ваша суточная норма калорий: {tdee:.0f} ккал\n\n"
-        f"Теперь статистика будет показывать процент от нормы!"
+        f"Суточная норма: {tdee:.0f} ккал"
     )
     await state.clear()
     await callback.answer()
@@ -860,10 +816,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
         await notify_admin(message.from_user.id, message.from_user.username, message.from_user.first_name)
         
         if referral_code:
-            await message.answer(
-                "Добро пожаловать!\n\n"
-                "Вы перешли по реферальной ссылке и получили +3 дня к тестовому периоду!"
-            )
+            await message.answer("Добро пожаловать!\n\nВы перешли по реферальной ссылке и получили +3 дня к тестовому периоду!")
     
     subscription = user_db.get_subscription_status(message.from_user.id)
     profile = user_db.get_profile(message.from_user.id)
@@ -875,6 +828,8 @@ async def cmd_start(message: types.Message, state: FSMContext):
         f"🥗 Расскажи, что съел — я посчитаю калории, белки, жиры и углеводы.\n"
         f"📊 Если заполнишь профиль — покажу процент от дневной нормы.\n\n"
         f"✨ {sub_status}\n\n"
+        f"🎤 Можешь записать голосовое сообщение\n"
+        f"🖼️ Или отправить фото еды\n\n"
         f"Попробуй прямо сейчас: «гречка 150г, отварная куриная грудка 150 грамм, салат из огурцов и томатов с оливковым маслом 150 грамм»"
     )
     
@@ -897,13 +852,15 @@ async def cmd_help(message: types.Message):
         "/clear — очистить статистику\n"
         "/profile — мой профиль\n"
         "/profile_edit — изменить профиль\n"
-        "/subscription — статус подписки\n\n"
+        "/subscription — статус подписки\n"
+        "/export — экспорт в Excel 📥\n\n"
         "Просто напишите, что съели, например:\n"
         "борщ 400г\n"
         "яичница 4 яйца\n"
         "гречка 200г, курица 150\n\n"
-        f"Связаться с админом: {ADMIN_CONTACT}\n\n"
-        "Администраторам: /admin_panel"
+        "🎤 Можно отправить голосовое сообщение\n"
+        "🖼️ Или фото еды\n\n"
+        f"Связаться с админом: {ADMIN_CONTACT}"
     )
     
     await message.answer(help_text)
@@ -912,7 +869,7 @@ async def cmd_help(message: types.Message):
 async def cmd_stats(message: types.Message):
     subscription = user_db.get_subscription_status(message.from_user.id)
     if subscription["days_left"] <= 0 and not subscription["is_active"] and not subscription.get("is_forever"):
-        await message.answer(f"Ваш тестовый период истёк.\n\nДля продолжения использования оформите подписку: {ADMIN_CONTACT}")
+        await message.answer(f"Ваш тестовый период истёк.\n\nДля продолжения: {ADMIN_CONTACT}")
         return
     
     stats = user_db.get_today_stats(message.from_user.id)
@@ -925,7 +882,7 @@ async def cmd_stats(message: types.Message):
 async def cmd_history(message: types.Message):
     subscription = user_db.get_subscription_status(message.from_user.id)
     if subscription["days_left"] <= 0 and not subscription["is_active"] and not subscription.get("is_forever"):
-        await message.answer(f"Ваш тестовый период истёк.\n\nДля продолжения использования оформите подписку: {ADMIN_CONTACT}")
+        await message.answer(f"Ваш тестовый период истёк.\n\nДля продолжения: {ADMIN_CONTACT}")
         return
     
     meals = user_db.get_recent_meals(message.from_user.id, 10)
@@ -955,6 +912,39 @@ async def handle_clear_callback(callback: types.CallbackQuery):
         await callback.message.edit_text("Отменено.")
     await callback.answer()
 
+# ============ ЭКСПОРТ ДЛЯ ПОЛЬЗОВАТЕЛЯ ============
+
+@dp.message(Command("export"))
+async def cmd_export(message: types.Message):
+    user_id = message.from_user.id
+    
+    parts = message.text.split()
+    days = 30
+    if len(parts) > 1:
+        try:
+            days = int(parts[1])
+        except ValueError:
+            pass
+    
+    meals = user_db.get_all_user_meals(user_id, days)
+    
+    if not meals:
+        await message.answer(f"Нет записей за последние {days} дней.")
+        return
+    
+    try:
+        excel_data = export_user_meals_to_excel(meals, days)
+        filename = f"питание_{datetime.now().strftime('%Y%m%d')}.xlsx"
+        
+        await message.answer_document(
+            document=types.BufferedInputFile(excel_data, filename=filename),
+            caption=f"📥 Ваш журнал питания за {days} дней ({len(meals)} записей)"
+        )
+    except Exception as e:
+        await message.answer(f"Ошибка при создании Excel: {e}")
+
+# ============ ПОДТВЕРЖДЕНИЕ (ИНЛАЙН-КНОПКИ) ============
+
 @dp.callback_query(lambda c: c.data.startswith("confirm_"))
 async def handle_confirmation_callback(callback: types.CallbackQuery, state: FSMContext):
     action = callback.data.replace("confirm_", "")
@@ -973,7 +963,7 @@ async def handle_confirmation_callback(callback: types.CallbackQuery, state: FSM
         response = f"✅ Сохранено!\n\n{format_daily_stats(stats, tdee)}"
         
         if not has_profile(callback.from_user.id):
-            response += "\n\nЕсли мы познакомимся, то я могу давать больше информации.\nИспользуйте команду /profile для настройки."
+            response += "\n\nИспользуйте /profile для настройки нормы."
         
         await callback.message.edit_text(response)
         await state.clear()
@@ -983,9 +973,7 @@ async def handle_confirmation_callback(callback: types.CallbackQuery, state: FSM
             "❌ Не записано.\n\n"
             "Напишите правильные данные, например:\n"
             "борщ 300г\n"
-            "кефир 200г\n"
-            "или\n"
-            "удали яйца"
+            "удали хлеб"
         )
     
     await callback.answer()
@@ -994,7 +982,6 @@ async def handle_confirmation_callback(callback: types.CallbackQuery, state: FSM
 
 @dp.message(WaitingState.waiting_for_correction)
 async def handle_correction(message: types.Message, state: FSMContext):
-    # Пропускаем сообщения без текста
     if not message.text:
         return
     
@@ -1015,30 +1002,21 @@ async def handle_correction(message: types.Message, state: FSMContext):
         response = f"Сохранено!\n\n{format_daily_stats(stats, tdee)}"
         
         if not has_profile(message.from_user.id):
-            response += "\n\nЕсли мы познакомимся, то я могу давать больше информации.\nИспользуйте команду /profile для настройки."
+            response += "\n\nИспользуйте /profile для настройки нормы."
         
         await message.answer(response)
         await state.clear()
         return
     
     if is_negative(user_text_lower) and not is_correction(user_text_lower):
-        await message.answer(
-            "Напишите правильные данные, например:\n"
-            "борщ 300г\n"
-            "кефир 200г\n"
-            "или\n"
-            "удали яйца"
-        )
+        await message.answer("Напишите правильные данные или 'удали X' для удаления продукта.")
         return
     
     if is_delete_command(user_text_lower):
         words_to_delete = re.findall(r'[\w]+', user_text.replace("удали", "").replace("убрать", "").replace("удалить", ""))
         if words_to_delete:
             to_delete = words_to_delete[0]
-            new_products = []
-            for p in original_products:
-                if to_delete not in p.get("name", "").lower():
-                    new_products.append(p)
+            new_products = [p for p in original_products if to_delete not in p.get("name", "").lower()]
             
             if len(new_products) == len(original_products):
                 await message.answer(f"Не найден продукт '{to_delete}' для удаления.")
@@ -1046,24 +1024,15 @@ async def handle_correction(message: types.Message, state: FSMContext):
             
             total = {"calories": 0, "protein": 0, "fat": 0, "carbs": 0}
             for p in new_products:
-                total["calories"] += p.get("calories", 0)
-                total["protein"] += p.get("protein", 0)
-                total["fat"] += p.get("fat", 0)
-                total["carbs"] += p.get("carbs", 0)
+                for key in total:
+                    total[key] += p.get(key, 0)
             
             lines = []
             for p in new_products:
-                name = p.get("name", "")
-                weight = p.get("weight_grams", 0)
-                cal = p.get("calories", 0)
-                prot = p.get("protein", 0)
-                fat = p.get("fat", 0)
-                carbs = p.get("carbs", 0)
-                lines.append(f"{name} - {weight}г, К {cal:.0f}, Б {prot:.1f}, Ж {fat:.1f}, У {carbs:.1f}")
+                lines.append(f"{p.get('name', '')} - {p.get('weight_grams', 0)}г, К {p.get('calories', 0):.0f}")
             
             result_text = "Обновлено:\n\n" + "\n".join(lines)
-            result_text += f"\n\nИТОГО: {total['calories']:.0f} ккал | Б: {total['protein']:.1f}г | Ж: {total['fat']:.1f}г | У: {total['carbs']:.1f}г"
-            result_text += "\n\nЗаписываю?"
+            result_text += f"\n\nИТОГО: {total['calories']:.0f} ккал\n\nЗаписываю?"
             
             await state.update_data(original_products=new_products)
             await message.answer(result_text, reply_markup=get_confirmation_keyboard())
@@ -1079,41 +1048,96 @@ async def handle_correction(message: types.Message, state: FSMContext):
         result = await food_search.parse_and_calculate(user_text)
         await waiting_msg.delete()
         
-        if not result["success"] or not result["data"].get("products"):
-            await message.answer(
-                "Не удалось распознать корректировку. Напишите, например:\n"
-                "борщ 300г\n"
-                "кефир 200г"
-            )
-            return
-        
-        new_products = result["data"].get("products", [])
-        total = result["data"].get("total", {})
-        
-        lines = []
-        for p in new_products:
-            name = p.get("name", "")
-            weight = p.get("weight_grams", 0)
-            cal = p.get("calories", 0)
-            prot = p.get("protein", 0)
-            fat = p.get("fat", 0)
-            carbs = p.get("carbs", 0)
-            lines.append(f"{name} - {weight}г, К {cal:.0f}, Б {prot:.1f}, Ж {fat:.1f}, У {carbs:.1f}")
-        
-        result_text = "Обновлено:\n\n" + "\n".join(lines)
-        result_text += f"\n\nИТОГО: {total['calories']:.0f} ккал | Б: {total['protein']:.1f}г | Ж: {total['fat']:.1f}г | У: {total['carbs']:.1f}г"
-        result_text += "\n\nЗаписываю?"
-        
-        await state.update_data(original_products=new_products)
-        await message.answer(result_text, reply_markup=get_confirmation_keyboard())
+        if result["success"] and result["data"].get("products"):
+            await state.update_data(original_products=result["data"]["products"])
+            await show_result(message, state, result, user_text)
+        else:
+            await message.answer("Не удалось распознать. Попробуйте: борщ 300г")
         return
     
-    await message.answer(
-        "Не понял. Напишите:\n"
-        "• новые данные, например: борщ 300г, кефир 200г\n"
-        "• 'удали X' — чтобы удалить продукт\n"
-        "Или нажмите кнопки выше."
-    )
+    await message.answer("Не понял. Напишите новые данные или нажмите кнопки выше.")
+
+# ============ ГОЛОСОВЫЕ СООБЩЕНИЯ ============
+
+@dp.message(lambda message: message.voice)
+async def handle_voice(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    
+    subscription = user_db.get_subscription_status(user_id)
+    if subscription["days_left"] <= 0 and not subscription["is_active"] and not subscription.get("is_forever"):
+        await message.answer(f"Ваш тестовый период истёк.\n\nДля продолжения: {ADMIN_CONTACT}")
+        return
+    
+    wait_msg = await message.answer("🎤 Распознаю речь и считаю КБЖУ...")
+    await bot.send_chat_action(message.chat.id, "typing")
+    
+    try:
+        file_id = message.voice.file_id
+        file = await bot.get_file(file_id)
+        
+        voice_data = io.BytesIO()
+        await bot.download_file(file.file_path, voice_data)
+        voice_bytes = voice_data.getvalue()
+        
+        result = await food_search.parse_voice(
+            recognized_text="Распознай речь и посчитай КБЖУ",
+            audio_data=voice_bytes
+        )
+        
+        await wait_msg.delete()
+        
+        if result["success"] and result["data"].get("products"):
+            await show_result(message, state, result, "голосовое сообщение")
+        else:
+            await message.answer("Не удалось обработать голосовое. Попробуйте написать текстом.")
+            
+    except Exception as e:
+        logger.error(f"Ошибка голосового: {e}")
+        await wait_msg.delete()
+        await message.answer("Ошибка обработки голосового. Попробуйте текстом.")
+
+# ============ ФОТО ============
+
+@dp.message(lambda message: message.photo)
+async def handle_photo(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    
+    subscription = user_db.get_subscription_status(user_id)
+    if subscription["days_left"] <= 0 and not subscription["is_active"] and not subscription.get("is_forever"):
+        await message.answer(f"Ваш тестовый период истёк.\n\nДля продолжения: {ADMIN_CONTACT}")
+        return
+    
+    wait_msg = await message.answer("🖼️ Анализирую фото и считаю КБЖУ...")
+    await bot.send_chat_action(message.chat.id, "typing")
+    
+    try:
+        photo = message.photo[-1]
+        file = await bot.get_file(photo.file_id)
+        
+        image_data = io.BytesIO()
+        await bot.download_file(file.file_path, image_data)
+        image_bytes = image_data.getvalue()
+        
+        mime_type = "image/jpeg"
+        if photo.file_path and photo.file_path.endswith('.png'):
+            mime_type = "image/png"
+        
+        result = await food_search.parse_photo(image_bytes, mime_type)
+        
+        await wait_msg.delete()
+        
+        if result["success"] and result["data"].get("products"):
+            await show_result(message, state, result, "фото еды")
+        else:
+            await message.answer(
+                "Не удалось распознать еду на фото.\n"
+                "Попробуйте описать текстом или сделайте другое фото."
+            )
+            
+    except Exception as e:
+        logger.error(f"Ошибка фото: {e}")
+        await wait_msg.delete()
+        await message.answer("Ошибка обработки фото. Попробуйте текстом.")
 
 # ============ ОСНОВНОЙ ОБРАБОТЧИК ============
 
@@ -1143,47 +1167,30 @@ async def handle_message(message: types.Message, state: FSMContext):
     await waiting_msg.delete()
     
     if not result["success"] or not result["data"].get("products"):
-        await message.answer("Не удалось обработать. Попробуйте написать по-другому, например:\nборщ 400г\nяичница 4 яйца\nстакан кефира")
+        await message.answer("Не удалось обработать. Попробуйте:\nборщ 400г\nяичница 4 яйца\nстакан кефира")
         return
     
-    data = result["data"]
-    products = data.get("products", [])
-    user_text = result.get("user_text", "")
-    
-    if not products:
-        await message.answer("Не удалось распознать продукты.")
-        return
-    
-    await state.set_state(WaitingState.waiting_for_correction)
-    await state.update_data(original_products=products, original_message=message.text)
-    
-    if user_text:
-        full_text = user_text + "\n\nЗаписываю?"
-    else:
-        lines = []
-        for p in products:
-            name = p.get("name", "")
-            weight = p.get("weight_grams", 0)
-            cal = p.get("calories", 0)
-            prot = p.get("protein", 0)
-            fat = p.get("fat", 0)
-            carbs = p.get("carbs", 0)
-            lines.append(f"{name} - {weight}г, К {cal:.0f}, Б {prot:.1f}, Ж {fat:.1f}, У {carbs:.1f}")
-        
-        total = data.get("total", {})
-        result_text = "\n".join(lines)
-        result_text += f"\n\nИТОГО: {total.get('calories', 0):.0f} ккал | Б: {total.get('protein', 0):.1f}г | Ж: {total.get('fat', 0):.1f}г | У: {total.get('carbs', 0):.1f}г"
-        result_text += "\n\nЗаписываю?"
-        full_text = result_text
-    
-    await message.answer(full_text, reply_markup=get_confirmation_keyboard())
+    await show_result(message, state, result)
 
 # ============ ЗАПУСК ============
 
 async def main():
+    global report_scheduler
+    
     await set_bot_commands()
-    print("Бот запущен")
-    await dp.start_polling(bot)
+    
+    # Запускаем планировщик отчётов
+    report_scheduler = ReportScheduler(bot, user_db, lambda uid: generate_daily_report(uid, user_db))
+    await report_scheduler.start()
+    
+    print("Бот запущен (v3.2)")
+    print(f"Модель: {OPENAI_MODEL}")
+    
+    try:
+        await dp.start_polling(bot)
+    finally:
+        if report_scheduler:
+            await report_scheduler.stop()
 
 if __name__ == "__main__":
     asyncio.run(main())

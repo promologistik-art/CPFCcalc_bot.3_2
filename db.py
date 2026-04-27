@@ -605,5 +605,50 @@ class UserDB:
             "is_forever": r[6]
         } for r in rows]
     
+    # ========== НОВЫЕ МЕТОДЫ ДЛЯ ВЕРСИИ 3.2 ==========
+    
+    def get_users_with_meals_today(self, today_date: str) -> list:
+        """Получает список user_id, у которых были приёмы пищи сегодня"""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT DISTINCT user_id FROM meals WHERE DATE(meal_time) = ?",
+            (today_date,)
+        )
+        return [row[0] for row in cursor.fetchall()]
+
+    def get_today_meals_count(self, user_id: int) -> int:
+        """Количество приёмов пищи за сегодня"""
+        cursor = self.conn.cursor()
+        today = date.today().isoformat()
+        cursor.execute(
+            "SELECT COUNT(*) FROM meals WHERE user_id = ? AND DATE(meal_time) = ?",
+            (user_id, today)
+        )
+        row = cursor.fetchone()
+        return row[0] if row else 0
+
+    def get_all_user_meals(self, user_id: int, days: int = 30) -> list:
+        """Получает все приёмы пищи пользователя за указанное количество дней"""
+        cursor = self.conn.cursor()
+        since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        cursor.execute(
+            """SELECT product_name, protein, fat, carbohydrates, calories, weight_grams, meal_time
+               FROM meals WHERE user_id = ? AND DATE(meal_time) >= ?
+               ORDER BY meal_time DESC""",
+            (user_id, since)
+        )
+        return [
+            {
+                "product_name": r[0],
+                "protein": r[1],
+                "fat": r[2],
+                "carbohydrates": r[3],
+                "calories": r[4],
+                "weight_grams": r[5],
+                "meal_time": r[6]
+            }
+            for r in cursor.fetchall()
+        ]
+    
     def close(self):
         self.conn.close()
