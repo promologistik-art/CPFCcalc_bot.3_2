@@ -3,7 +3,7 @@
 """
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from config import REPORT_HOUR
 
 logger = logging.getLogger(__name__)
@@ -27,13 +27,19 @@ class ReportScheduler:
 
     async def _run_scheduler(self):
         while True:
-            now = datetime.now()
-            report_time = now.replace(hour=REPORT_HOUR, minute=0, second=0, microsecond=0)
-            if now >= report_time:
-                report_time = report_time.replace(day=now.day + 1)
+            # Берём московское время (UTC+3)
+            now_msk = datetime.utcnow() + timedelta(hours=3)
+            report_time = now_msk.replace(hour=REPORT_HOUR, minute=0, second=0, microsecond=0)
             
-            wait_seconds = (report_time - now).total_seconds()
-            logger.info(f"📊 Следующий отчёт через {wait_seconds / 3600:.1f} часов")
+            if now_msk >= report_time:
+                report_time = report_time + timedelta(days=1)
+            
+            # Переводим обратно в UTC для sleep
+            report_time_utc = report_time - timedelta(hours=3)
+            now_utc = datetime.utcnow()
+            
+            wait_seconds = (report_time_utc - now_utc).total_seconds()
+            logger.info(f"📊 Следующий отчёт через {wait_seconds / 3600:.1f} часов (в {REPORT_HOUR}:00 МСК)")
             
             await asyncio.sleep(wait_seconds)
             await self._send_daily_reports()
@@ -41,7 +47,7 @@ class ReportScheduler:
     async def _send_daily_reports(self):
         logger.info("📊 Начинаем рассылку ежедневных отчётов...")
         
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.utcnow().strftime("%Y-%m-%d")
         active_users = self.user_db.get_users_with_meals_today(today)
         
         if not active_users:
@@ -81,7 +87,7 @@ async def generate_daily_report(user_id: int, user_db) -> str:
     meals_count = user_db.get_today_meals_count(user_id)
     profile = user_db.get_profile(user_id)
     
-    today = datetime.now().strftime("%d.%m.%Y")
+    today = datetime.utcnow().strftime("%d.%m.%Y")
     
     calories = stats.get('calories', 0)
     protein = stats.get('protein', 0)

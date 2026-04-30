@@ -831,9 +831,8 @@ async def cmd_start(message: types.Message, state: FSMContext):
         f"📊 Если заполнишь профиль — покажу процент от дневной нормы.\n\n"
         f"✨ {sub_status}\n\n"
         f"🎤 Можешь записать голосовое сообщение\n"
-        f"🖼️ Или отправить фото еды\n"
         f"📥 Экспорт истории: /export\n\n"
-        f"Попробуй прямо сейчас: «гречка 150г, отварная куриная грудка 150 грамм, салат из огурцов и томатов с оливковым маслом 150 грамм»"
+        f"Напиши прямо сейчас, например: «гречка 150г, отварная куриная грудка 150 грамм, салат из огурцов и томатов с оливковым маслом 150 грамм»"
     )
     
     if not profile:
@@ -862,7 +861,7 @@ async def cmd_help(message: types.Message):
         "яичница 4 яйца\n"
         "гречка 200г, курица 150\n\n"
         "🎤 Можно отправить голосовое сообщение\n"
-        "🖼️ Или фото еды\n\n"
+        
         f"Связаться с админом: {ADMIN_CONTACT}"
     )
     
@@ -1026,48 +1025,6 @@ async def handle_voice(message: types.Message, state: FSMContext):
         await wait_msg.delete()
         await message.answer("Ошибка обработки голосового. Попробуйте текстом.")
 
-# ============ ФОТО ============
-
-@dp.message(lambda message: message.photo)
-async def handle_photo(message: types.Message, state: FSMContext):
-    user_id = message.from_user.id
-    
-    subscription = user_db.get_subscription_status(user_id)
-    if subscription["days_left"] <= 0 and not subscription["is_active"] and not subscription.get("is_forever"):
-        await message.answer(f"Ваш тестовый период истёк.\n\nДля продолжения: {ADMIN_CONTACT}")
-        return
-    
-    wait_msg = await message.answer("🖼️ Анализирую фото и считаю КБЖУ...")
-    await bot.send_chat_action(message.chat.id, "typing")
-    
-    try:
-        photo = message.photo[-1]
-        file = await bot.get_file(photo.file_id)
-        
-        image_data = io.BytesIO()
-        await bot.download_file(file.file_path, image_data)
-        image_bytes = image_data.getvalue()
-        
-        mime_type = "image/jpeg"
-        if photo.file_path and photo.file_path.endswith('.png'):
-            mime_type = "image/png"
-        
-        result = await food_search.parse_photo(image_bytes, mime_type)
-        
-        await wait_msg.delete()
-        
-        if result["success"] and result["data"].get("products"):
-            await show_result(message, state, result, "фото еды")
-        else:
-            await message.answer(
-                "Не удалось распознать еду на фото.\n"
-                "Попробуйте описать текстом или сделайте другое фото."
-            )
-            
-    except Exception as e:
-        logger.error(f"Ошибка фото: {e}")
-        await wait_msg.delete()
-        await message.answer("Ошибка обработки фото. Попробуйте текстом.")
 
 # ============ ОБРАБОТЧИК КОРРЕКЦИИ ============
 
