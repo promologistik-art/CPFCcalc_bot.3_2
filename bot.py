@@ -860,12 +860,13 @@ async def cmd_help(message: types.Message):
         "борщ 400г\n"
         "яичница 4 яйца\n"
         "гречка 200г, курица 150\n\n"
-        "🎤 Можно отправить голосовое сообщение\n"
-        
+        "🎤 Можно отправить голосовое сообщение\n\n"
         f"Связаться с админом: {ADMIN_CONTACT}"
     )
     
-    await message.answer(help_text)
+    help_text += "\n\n📢 <a href='https://t.me/+MAuGbcnBQmgxZTIy'>Больше наших ботов в канале</a>"
+    
+    await message.answer(help_text, parse_mode="HTML", disable_web_page_preview=True)
 
 @dp.message(Command("stats"))
 async def cmd_stats(message: types.Message):
@@ -1024,7 +1025,6 @@ async def handle_voice(message: types.Message, state: FSMContext):
         logger.error(f"Ошибка голосового: {e}")
         await wait_msg.delete()
         await message.answer("Ошибка обработки голосового. Попробуйте текстом.")
-
 
 # ============ ОБРАБОТЧИК КОРРЕКЦИИ ============
 
