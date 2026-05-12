@@ -2,6 +2,7 @@ import logging
 import asyncio
 import re
 import io
+import unicodedata
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -151,6 +152,17 @@ def is_delete_command(text: str) -> bool:
 def has_profile(user_id: int) -> bool:
     return user_db.get_profile(user_id) is not None
 
+def is_emoji_name(name: str) -> bool:
+    """Проверяет, состоит ли имя только из эмодзи и пробелов"""
+    if not name:
+        return False
+    # Убираем пробелы и спецсимволы (Zero Width Joiner, Variation Selector)
+    name_clean = name.replace(" ", "").replace("\u200d", "").replace("\ufe0f", "")
+    if not name_clean:
+        return False
+    # Проверяем, все ли символы — эмодзи (категория So = Symbol, Other)
+    return all(unicodedata.category(c).startswith('So') for c in name_clean)
+
 async def get_user_id_or_username(user_input: str) -> int:
     user_input = user_input.strip()
     if user_input.isdigit():
@@ -278,15 +290,12 @@ async def cmd_admin_activity(message: types.Message):
     if len(parts) > 1:
         arg = parts[1].lower()
         if arg in ["day", "день", "сутки", "1", "today", "сегодня"]:
-            period = "day"
             period_name = "за сегодня"
             days = 1
         elif arg in ["week", "неделя", "7"]:
-            period = "week"
             period_name = "за 7 дней"
             days = 7
         elif arg in ["month", "месяц", "30"]:
-            period = "month"
             period_name = "за 30 дней"
             days = 30
         else:
@@ -299,7 +308,6 @@ async def cmd_admin_activity(message: types.Message):
             )
             return
     else:
-        period = "day"
         period_name = "за сегодня"
         days = 1
     
@@ -322,8 +330,21 @@ async def cmd_admin_activity(message: types.Message):
     text += "─" * 25 + "\n\n"
     
     for i, a in enumerate(activity, 1):
+        name = a['first_name'] or "Без имени"
         username_str = f" @{a['username']}" if a['username'] else ""
-        text += f"{i}. {a['first_name']}{username_str}\n"
+        
+        # Проверяем, не состоит ли имя только из эмодзи
+        if is_emoji_name(name):
+            if a['username']:
+                display_name = f"@{a['username']}"
+            else:
+                display_name = f"tg://user?id={a['user_id']}"
+            text += f"{i}. {display_name}\n"
+            text += f"   ID: {a['user_id']} (имя из эмодзи)\n"
+        else:
+            text += f"{i}. {name}{username_str}\n"
+            text += f"   ID: {a['user_id']}\n"
+        
         text += f"   Запросов: {a['total_meals']} | Калорий: {a['total_calories']:.0f} ккал"
         
         if days > 1:
