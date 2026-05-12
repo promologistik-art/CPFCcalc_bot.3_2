@@ -2,7 +2,7 @@ import logging
 import asyncio
 import re
 import io
-from datetime import datetime
+from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
@@ -166,6 +166,21 @@ def format_date(date_str: str) -> str:
         return f"{parts[2]}.{parts[1]}.{parts[0]}"
     return date_str[:10]
 
+def format_datetime(dt_str: str) -> str:
+    """Форматирует дату и время из ISO-формата"""
+    if not dt_str:
+        return ""
+    try:
+        parts = dt_str.split()
+        if len(parts) >= 2:
+            date_part = parts[0].split('-')
+            time_part = parts[1].split('+')[0].split('.')[0][:5]
+            if len(date_part) == 3:
+                return f"{date_part[2]}.{date_part[1]}.{date_part[0]} {time_part}"
+        return dt_str[:16]
+    except:
+        return dt_str[:16]
+
 async def show_result(message: types.Message, state: FSMContext, result: dict, source_text: str = None):
     data = result["data"]
     products = data.get("products", [])
@@ -207,6 +222,7 @@ async def cmd_admin_panel(message: types.Message):
         "Админ-панель\n\n"
         "/admin_users — список пользователей\n"
         "/admin_export — выгрузить список в Excel 📊\n"
+        "/admin_activity — отчёт по активности пользователей 📈\n"
         "/admin_info user_id или @username — информация о пользователе\n"
         "/admin_add_user — добавить пользователя\n"
         "/admin_extend user_id или @username days — продлить подписку\n"
@@ -247,6 +263,86 @@ async def cmd_admin_export(message: types.Message):
         )
     except Exception as e:
         await message.answer(f"Ошибка при создании Excel-файла: {e}")
+
+# ============ ОТЧЁТ ПО АКТИВНОСТИ ============
+
+@dp.message(Command("admin_activity"))
+async def cmd_admin_activity(message: types.Message):
+    if not is_admin(message.from_user.id, message.from_user.username):
+        await message.answer("Нет доступа")
+        return
+    
+    parts = message.text.split()
+    
+    # Определяем период
+    if len(parts) > 1:
+        arg = parts[1].lower()
+        if arg in ["day", "день", "сутки", "1", "today", "сегодня"]:
+            period = "day"
+            period_name = "за сегодня"
+            days = 1
+        elif arg in ["week", "неделя", "7"]:
+            period = "week"
+            period_name = "за 7 дней"
+            days = 7
+        elif arg in ["month", "месяц", "30"]:
+            period = "month"
+            period_name = "за 30 дней"
+            days = 30
+        else:
+            await message.answer(
+                "Использование:\n"
+                "/admin_activity — за сегодня\n"
+                "/admin_activity day — за сегодня\n"
+                "/admin_activity week — за 7 дней\n"
+                "/admin_activity month — за 30 дней"
+            )
+            return
+    else:
+        period = "day"
+        period_name = "за сегодня"
+        days = 1
+    
+    # Получаем данные
+    activity = user_db.get_user_activity(days)
+    
+    if not activity:
+        await message.answer(f"Нет активности {period_name}.")
+        return
+    
+    # Формируем отчёт
+    total_users = len(activity)
+    total_meals = sum(a["total_meals"] for a in activity)
+    total_calories = sum(a["total_calories"] for a in activity)
+    
+    text = f"📈 Отчёт по активности {period_name}\n\n"
+    text += f"Активных пользователей: {total_users}\n"
+    text += f"Всего приёмов пищи: {total_meals}\n"
+    text += f"Всего калорий: {total_calories:.0f} ккал\n"
+    text += "─" * 25 + "\n\n"
+    
+    for i, a in enumerate(activity, 1):
+        username_str = f" @{a['username']}" if a['username'] else ""
+        text += f"{i}. {a['first_name']}{username_str}\n"
+        text += f"   Запросов: {a['total_meals']} | Калорий: {a['total_calories']:.0f} ккал"
+        
+        if days > 1:
+            text += f" | Дней: {a['active_days']}/{days}"
+        
+        if a['first_meal']:
+            text += f"\n   Первый: {format_datetime(a['first_meal'])}"
+        if a['last_meal']:
+            text += f" | Последний: {format_datetime(a['last_meal'])}"
+        
+        text += "\n\n"
+    
+    # Если отчёт большой, отправляем частями
+    if len(text) > 4000:
+        parts_list = [text[i:i+4000] for i in range(0, len(text), 4000)]
+        for part in parts_list:
+            await message.answer(part)
+    else:
+        await message.answer(text)
 
 # ============ БЭКАП ============
 

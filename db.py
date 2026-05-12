@@ -605,7 +605,7 @@ class UserDB:
             "is_forever": r[6]
         } for r in rows]
     
-    # ========== НОВЫЕ МЕТОДЫ ДЛЯ ВЕРСИИ 3.2 ==========
+    # ========== МЕТОДЫ ДЛЯ ВЕРСИИ 3.2 ==========
     
     def get_users_with_meals_today(self, today_date: str) -> list:
         """Получает список user_id, у которых были приёмы пищи сегодня"""
@@ -646,6 +646,78 @@ class UserDB:
                 "calories": r[4],
                 "weight_grams": r[5],
                 "meal_time": r[6]
+            }
+            for r in cursor.fetchall()
+        ]
+    
+    # ========== НОВЫЕ МЕТОДЫ ДЛЯ АКТИВНОСТИ ==========
+    
+    def get_user_activity(self, days: int = 1) -> list:
+        """Получает статистику активности пользователей за указанное количество дней"""
+        cursor = self.conn.cursor()
+        since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+        cursor.execute(
+            """SELECT 
+                u.user_id, 
+                u.first_name, 
+                u.username,
+                COUNT(m.id) as total_meals,
+                SUM(m.calories) as total_calories,
+                COUNT(DISTINCT DATE(m.meal_time)) as active_days,
+                MIN(m.meal_time) as first_meal,
+                MAX(m.meal_time) as last_meal
+            FROM users u
+            INNER JOIN meals m ON u.user_id = m.user_id
+            WHERE DATE(m.meal_time) >= ?
+            GROUP BY u.user_id
+            ORDER BY total_meals DESC""",
+            (since,)
+        )
+        return [
+            {
+                "user_id": r[0],
+                "first_name": r[1],
+                "username": r[2],
+                "total_meals": r[3],
+                "total_calories": round(r[4] or 0, 1),
+                "active_days": r[5],
+                "first_meal": r[6],
+                "last_meal": r[7]
+            }
+            for r in cursor.fetchall()
+        ]
+    
+    def get_daily_activity(self, date_str: str = None) -> list:
+        """Получает активность за конкретный день (по умолчанию сегодня)"""
+        if not date_str:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+        
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """SELECT 
+                u.user_id, 
+                u.first_name, 
+                u.username,
+                COUNT(m.id) as total_meals,
+                SUM(m.calories) as total_calories,
+                MIN(m.meal_time) as first_meal,
+                MAX(m.meal_time) as last_meal
+            FROM users u
+            INNER JOIN meals m ON u.user_id = m.user_id
+            WHERE DATE(m.meal_time) = ?
+            GROUP BY u.user_id
+            ORDER BY total_meals DESC""",
+            (date_str,)
+        )
+        return [
+            {
+                "user_id": r[0],
+                "first_name": r[1],
+                "username": r[2],
+                "total_meals": r[3],
+                "total_calories": round(r[4] or 0, 1),
+                "first_meal": r[5],
+                "last_meal": r[6]
             }
             for r in cursor.fetchall()
         ]
