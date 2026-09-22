@@ -11,6 +11,7 @@ class UserDB:
         os.makedirs(os.path.dirname(USER_DB_PATH), exist_ok=True)
         self.conn = sqlite3.connect(USER_DB_PATH)
         self.create_tables()
+        self._migrate()
         print(f"База данных подключена: {USER_DB_PATH}")
     
     def create_tables(self):
@@ -19,8 +20,10 @@ class UserDB:
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
+                short_id INTEGER UNIQUE,
                 username TEXT,
                 first_name TEXT,
+                is_blocked BOOLEAN DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
@@ -34,6 +37,7 @@ class UserDB:
                 age INTEGER,
                 activity_level TEXT,
                 gender TEXT,
+                goal TEXT,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users (user_id)
             )
@@ -46,6 +50,8 @@ class UserDB:
                 is_forever BOOLEAN DEFAULT 0,
                 trial_end DATE,
                 paid_until DATE,
+                report_enabled BOOLEAN DEFAULT 0,
+                report_time TEXT DEFAULT '07:00',
                 FOREIGN KEY (user_id) REFERENCES users (user_id)
             )
         ''')
@@ -73,6 +79,21 @@ class UserDB:
                 total_carbs REAL DEFAULT 0,
                 total_calories REAL DEFAULT 0,
                 PRIMARY KEY (user_id, date)
+            )
+        ''')
+        
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS user_products (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                product_name TEXT,
+                protein REAL,
+                fat REAL,
+                carbohydrates REAL,
+                calories REAL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (user_id),
+                UNIQUE(user_id, product_name)
             )
         ''')
         
@@ -105,6 +126,58 @@ class UserDB:
         
         self.conn.commit()
     
+    def _migrate(self):
+        """Добавляет недостающие колонки и присваивает short_id"""
+        cursor = self.conn.cursor()
+        
+        # profiles.goal
+        cursor.execute("PRAGMA table_info(profiles)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if 'goal' not in columns:
+            cursor.execute("ALTER TABLE profiles ADD COLUMN goal TEXT")
+            self.conn.commit()
+            print("✅ Добавлена колонка goal в profiles")
+        
+        # subscriptions.report_enabled / report_time
+        cursor.execute("PRAGMA table_info(subscriptions)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if 'report_enabled' not in columns:
+            cursor.execute("ALTER TABLE subscriptions ADD COLUMN report_enabled BOOLEAN DEFAULT 0")
+            self.conn.commit()
+            print("✅ Добавлена report_enabled в subscriptions")
+        if 'report_time' not in columns:
+            cursor.execute("ALTER TABLE subscriptions ADD COLUMN report_time TEXT DEFAULT '07:00'")
+            self.conn.commit()
+            print("✅ Добавлена report_time в subscriptions")
+        
+        # users.short_id
+        cursor.execute("PRAGMA table_info(users)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if 'short_id' not in columns:
+            cursor.execute("ALTER TABLE users ADD COLUMN short_id INTEGER")
+            self.conn.commit()
+            print("✅ Добавлена колонка short_id в users")
+        
+        # users.is_blocked
+        if 'is_blocked' not in columns:
+            cursor.execute("ALTER TABLE users ADD COLUMN is_blocked BOOLEAN DEFAULT 0")
+            self.conn.commit()
+            print("✅ Добавлена колонка is_blocked в users")
+        
+        # Присваиваем short_id всем, у кого его нет
+        cursor.execute("SELECT user_id FROM users WHERE short_id IS NULL ORDER BY created_at")
+        users_without_short_id = cursor.fetchall()
+        
+        if users_without_short_id:
+            # Находим максимальный существующий short_id
+            cursor.execute("SELECT COALESCE(MAX(short_id), 0) FROM users")
+            max_short_id = cursor.fetchone()[0]
+            
+            for idx, (user_id,) in enumerate(users_without_short_id, max_short_id + 1):
+                cursor.execute("UPDATE users SET short_id = ? WHERE user_id = ?", (idx, user_id))
+            self.conn.commit()
+            print(f"✅ Присвоены short_id для {len(users_without_short_id)} пользователей")
+    
     def get_or_create_user(self, user_id: int, username: str = None, first_name: str = None, referral_code: str = None) -> tuple:
         cursor = self.conn.cursor()
         cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
@@ -112,9 +185,13 @@ class UserDB:
         
         is_new = False
         if not user:
+            # Получаем следующий short_id
+            cursor.execute("SELECT COALESCE(MAX(short_id), 0) + 1 FROM users")
+            next_short_id = cursor.fetchone()[0]
+            
             cursor.execute(
-                "INSERT INTO users (user_id, username, first_name) VALUES (?, ?, ?)",
-                (user_id, username, first_name)
+                "INSERT INTO users (user_id, short_id, username, first_name) VALUES (?, ?, ?, ?)",
+                (user_id, next_short_id, username, first_name)
             )
             
             extra_days = 0
@@ -193,6 +270,253 @@ class UserDB:
         row = cursor.fetchone()
         return row[0] if row else None
     
+    def get_user_by_short_id(self, short_id: int) -> Optional[Dict]:
+        """Получает пользователя по внутреннему ID"""
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT u.user_id, u.short_id, u.username, u.first_name, u.is_blocked, u.created_at,
+                   s.is_forever, s.trial_end, s.paid_until
+            FROM users u
+            LEFT JOIN subscriptions s ON u.user_id = s.user_id
+            WHERE u.short_id = ?
+        ''', (short_id,))
+        row = cursor.fetchone()
+        if row:
+            return {
+                "user_id": row[0],
+                "short_id": row[1],
+                "username": row[2],
+                "first_name": row[3],
+                "is_blocked": bool(row[4]),
+                "created_at": row[5],
+                "is_forever": bool(row[6]) if row[6] is not None else False,
+                "trial_end": row[7],
+                "paid_until": row[8]
+            }
+        return None
+    
+    def get_all_users_with_short_id(self) -> List[Dict]:
+        """Получает всех пользователей с short_id для админ-списка"""
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT u.user_id, u.short_id, u.username, u.first_name, u.is_blocked,
+                   s.is_forever, s.trial_end, s.paid_until
+            FROM users u
+            LEFT JOIN subscriptions s ON u.user_id = s.user_id
+            ORDER BY u.short_id
+        ''')
+        rows = cursor.fetchall()
+        
+        users = []
+        for r in rows:
+            is_active = False
+            status_text = "нет подписки"
+            end_date = None
+            
+            if r[5]:  # is_forever
+                is_active = True
+                status_text = "бессрочно"
+            elif r[7]:  # paid_until
+                paid_until = date.fromisoformat(r[7])
+                if paid_until >= date.today():
+                    is_active = True
+                    status_text = f"оплачено до {paid_until.strftime('%d.%m')}"
+                    end_date = r[7]
+                else:
+                    status_text = "истекла"
+            elif r[6]:  # trial_end
+                trial_end = date.fromisoformat(r[6])
+                if trial_end >= date.today():
+                    is_active = True
+                    status_text = f"триал до {trial_end.strftime('%d.%m')}"
+                    end_date = r[6]
+                else:
+                    status_text = "триал истёк"
+            
+            users.append({
+                "user_id": r[0],
+                "short_id": r[1],
+                "username": r[2],
+                "first_name": r[3],
+                "is_blocked": bool(r[4]),
+                "is_active": is_active,
+                "status_text": status_text,
+                "end_date": end_date
+            })
+        
+        return users
+    
+    def toggle_block_user(self, user_id: int) -> bool:
+        """Переключает блокировку пользователя. Возвращает новое состояние (True = заблокирован)"""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT is_blocked FROM users WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        if not row:
+            return False
+        
+        new_state = 0 if row[0] else 1
+        cursor.execute("UPDATE users SET is_blocked = ? WHERE user_id = ?", (new_state, user_id))
+        self.conn.commit()
+        return bool(new_state)
+    
+    def is_user_blocked(self, user_id: int) -> bool:
+        """Проверяет, заблокирован ли пользователь"""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT is_blocked FROM users WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        return bool(row[0]) if row else False
+    
+    def remove_subscription(self, user_id: int):
+        """Удаляет подписку пользователя (обнуляет все даты)"""
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            UPDATE subscriptions 
+            SET is_forever = 0, trial_end = NULL, paid_until = NULL 
+            WHERE user_id = ?
+        ''', (user_id,))
+        self.conn.commit()
+    
+    def add_user_product(self, user_id: int, name: str, protein: float, fat: float, carbs: float, calories: float) -> bool:
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute('''
+                INSERT INTO user_products (user_id, product_name, protein, fat, carbohydrates, calories)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (user_id, name, protein, fat, carbs, calories))
+            self.conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            return False
+    
+    def get_user_products(self, user_id: int) -> List[Dict]:
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT product_name, protein, fat, carbohydrates, calories
+            FROM user_products
+            WHERE user_id = ?
+            ORDER BY product_name
+        ''', (user_id,))
+        rows = cursor.fetchall()
+        return [{
+            "name": r[0],
+            "protein": r[1],
+            "fat": r[2],
+            "carbohydrates": r[3],
+            "calories": r[4]
+        } for r in rows]
+    
+    def delete_user_product(self, user_id: int, name: str) -> bool:
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            DELETE FROM user_products WHERE user_id = ? AND product_name = ?
+        ''', (user_id, name))
+        self.conn.commit()
+        return cursor.rowcount > 0
+    
+    def get_all_products_for_search(self, user_id: int) -> Dict:
+        from config import FOOD_DB_PATH
+        import json
+        
+        global_db = {}
+        
+        if os.path.exists(FOOD_DB_PATH):
+            with open(FOOD_DB_PATH, 'r', encoding='utf-8') as f:
+                global_db = json.load(f)
+        else:
+            print(f"ВНИМАНИЕ: Файл базы продуктов не найден: {FOOD_DB_PATH}")
+            global_db = {
+                "хлеб": {"protein": 7.5, "fat": 2.9, "carbohydrates": 50.9, "calories": 264},
+                "яйцо куриное": {"protein": 12.5, "fat": 11.5, "carbohydrates": 0.7, "calories": 157},
+                "сахар": {"protein": 0, "fat": 0, "carbohydrates": 100, "calories": 400},
+            }
+        
+        user_products = self.get_user_products(user_id)
+        for p in user_products:
+            global_db[p["name"]] = {
+                "protein": p["protein"],
+                "fat": p["fat"],
+                "carbohydrates": p["carbohydrates"],
+                "calories": p["calories"]
+            }
+        
+        return global_db
+    
+    def set_report_settings(self, user_id: int, enabled: bool, report_time: str = None):
+        cursor = self.conn.cursor()
+        if report_time:
+            cursor.execute('''
+                UPDATE subscriptions SET report_enabled = ?, report_time = ? WHERE user_id = ?
+            ''', (1 if enabled else 0, report_time, user_id))
+        else:
+            cursor.execute('''
+                UPDATE subscriptions SET report_enabled = ? WHERE user_id = ?
+            ''', (1 if enabled else 0, user_id))
+        self.conn.commit()
+    
+    def get_report_settings(self, user_id: int) -> dict:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT report_enabled, report_time FROM subscriptions WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        if row:
+            return {"enabled": bool(row[0]), "time": row[1] or "07:00"}
+        return {"enabled": False, "time": "07:00"}
+    
+    def get_report_users(self) -> List[Dict]:
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            SELECT user_id, report_time FROM subscriptions 
+            WHERE report_enabled = 1 AND (is_forever = 1 OR paid_until >= date('now') OR trial_end >= date('now'))
+        ''')
+        rows = cursor.fetchall()
+        return [{"user_id": r[0], "report_time": r[1] or "07:00"} for r in rows]
+    
+    def get_yesterday_stats(self, user_id: int) -> Optional[Dict]:
+        cursor = self.conn.cursor()
+        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        cursor.execute('''
+            SELECT total_calories, total_protein, total_fat, total_carbs
+            FROM daily_stats
+            WHERE user_id = ? AND date = ?
+        ''', (user_id, yesterday))
+        row = cursor.fetchone()
+        if row:
+            return {
+                "calories": row[0] or 0,
+                "protein": row[1] or 0,
+                "fat": row[2] or 0,
+                "carbs": row[3] or 0
+            }
+        return None
+    
+    def get_stats_for_period(self, user_id: int, days: int) -> List[Dict]:
+        cursor = self.conn.cursor()
+        start_date = (date.today() - timedelta(days=days)).isoformat()
+        cursor.execute('''
+            SELECT date, total_calories, total_protein, total_fat, total_carbs
+            FROM daily_stats
+            WHERE user_id = ? AND date >= ?
+            ORDER BY date
+        ''', (user_id, start_date))
+        rows = cursor.fetchall()
+        return [{
+            "date": r[0],
+            "calories": r[1] or 0,
+            "protein": r[2] or 0,
+            "fat": r[3] or 0,
+            "carbs": r[4] or 0
+        } for r in rows]
+    
+    def set_goal(self, user_id: int, goal: str):
+        cursor = self.conn.cursor()
+        cursor.execute("UPDATE profiles SET goal = ? WHERE user_id = ?", (goal, user_id))
+        self.conn.commit()
+    
+    def get_goal(self, user_id: int) -> Optional[str]:
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT goal FROM profiles WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        return row[0] if row else None
+    
     def generate_referral_link(self, username: str, commission_percent: int, bonus_months: int) -> str:
         cursor = self.conn.cursor()
         temp_id = -abs(hash(username)) % 1000000
@@ -210,26 +534,6 @@ class UserDB:
         self.conn.commit()
         
         return code
-    
-    def get_all_user_ids(self) -> List[int]:
-        """Получает список всех user_id для рассылки"""
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT user_id FROM users")
-        rows = cursor.fetchall()
-        return [row[0] for row in rows]
-    
-    def get_active_user_ids(self) -> List[int]:
-        """Получает список пользователей с активной подпиской"""
-        cursor = self.conn.cursor()
-        today = date.today().isoformat()
-        cursor.execute('''
-            SELECT user_id FROM subscriptions 
-            WHERE is_forever = 1 
-            OR (paid_until IS NOT NULL AND paid_until >= ?)
-            OR (trial_end IS NOT NULL AND trial_end >= ?)
-        ''', (today, today))
-        rows = cursor.fetchall()
-        return [row[0] for row in rows]
     
     def get_referral_stats(self) -> List[Dict]:
         cursor = self.conn.cursor()
@@ -353,7 +657,7 @@ class UserDB:
     def get_profile(self, user_id: int) -> Optional[Dict]:
         cursor = self.conn.cursor()
         cursor.execute(
-            "SELECT name, weight, height, age, activity_level, gender FROM profiles WHERE user_id = ?",
+            "SELECT name, weight, height, age, activity_level, gender, goal FROM profiles WHERE user_id = ?",
             (user_id,)
         )
         row = cursor.fetchone()
@@ -364,15 +668,16 @@ class UserDB:
                 "height": row[2],
                 "age": row[3],
                 "activity_level": row[4],
-                "gender": row[5]
+                "gender": row[5],
+                "goal": row[6]
             }
         return None
     
     def save_profile(self, user_id: int, data: Dict):
         cursor = self.conn.cursor()
         cursor.execute('''
-            INSERT OR REPLACE INTO profiles (user_id, name, weight, height, age, activity_level, gender, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            INSERT OR REPLACE INTO profiles (user_id, name, weight, height, age, activity_level, gender, goal, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ''', (
             user_id,
             data.get("name"),
@@ -380,7 +685,8 @@ class UserDB:
             data.get("height"),
             data.get("age"),
             data.get("activity_level"),
-            data.get("gender")
+            data.get("gender"),
+            data.get("goal")
         ))
         self.conn.commit()
     
@@ -484,6 +790,7 @@ class UserDB:
         cursor.execute("DELETE FROM daily_stats WHERE user_id = ?", (user_id,))
         cursor.execute("DELETE FROM profiles WHERE user_id = ?", (user_id,))
         cursor.execute("DELETE FROM subscriptions WHERE user_id = ?", (user_id,))
+        cursor.execute("DELETE FROM user_products WHERE user_id = ?", (user_id,))
         cursor.execute("DELETE FROM referrals WHERE referrer_id = ? OR referee_id = ?", (user_id, user_id))
         cursor.execute("DELETE FROM referral_links WHERE referrer_id = ?", (user_id,))
         cursor.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
@@ -565,162 +872,4 @@ class UserDB:
             FROM meals
             WHERE user_id = ?
             ORDER BY meal_time DESC
-            LIMIT ?
-        ''', (user_id, limit))
-        rows = cursor.fetchall()
-        return [{
-            "product_name": row[0],
-            "protein": row[1],
-            "fat": row[2],
-            "carbohydrates": row[3],
-            "calories": row[4],
-            "weight_grams": row[5],
-            "meal_time": row[6]
-        } for row in rows]
-    
-    def clear_today(self, user_id: int):
-        cursor = self.conn.cursor()
-        today = date.today().isoformat()
-        cursor.execute("DELETE FROM meals WHERE user_id = ? AND DATE(meal_time) = ?", (user_id, today))
-        cursor.execute("DELETE FROM daily_stats WHERE user_id = ? AND date = ?", (user_id, today))
-        self.conn.commit()
-    
-    def get_all_users(self) -> List[dict]:
-        cursor = self.conn.cursor()
-        cursor.execute('''
-            SELECT u.user_id, u.username, u.first_name, u.created_at,
-                   s.trial_end, s.paid_until, s.is_forever
-            FROM users u
-            LEFT JOIN subscriptions s ON u.user_id = s.user_id
-            ORDER BY u.created_at DESC
-        ''')
-        rows = cursor.fetchall()
-        return [{
-            "user_id": r[0],
-            "username": r[1],
-            "first_name": r[2],
-            "created_at": r[3],
-            "trial_end": r[4],
-            "paid_until": r[5],
-            "is_forever": r[6]
-        } for r in rows]
-    
-    # ========== МЕТОДЫ ДЛЯ ВЕРСИИ 3.2 ==========
-    
-    def get_users_with_meals_today(self, today_date: str) -> list:
-        """Получает список user_id, у которых были приёмы пищи сегодня"""
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "SELECT DISTINCT user_id FROM meals WHERE DATE(meal_time) = ?",
-            (today_date,)
-        )
-        return [row[0] for row in cursor.fetchall()]
-
-    def get_today_meals_count(self, user_id: int) -> int:
-        """Количество приёмов пищи за сегодня"""
-        cursor = self.conn.cursor()
-        today = date.today().isoformat()
-        cursor.execute(
-            "SELECT COUNT(*) FROM meals WHERE user_id = ? AND DATE(meal_time) = ?",
-            (user_id, today)
-        )
-        row = cursor.fetchone()
-        return row[0] if row else 0
-
-    def get_all_user_meals(self, user_id: int, days: int = 30) -> list:
-        """Получает все приёмы пищи пользователя за указанное количество дней"""
-        cursor = self.conn.cursor()
-        since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-        cursor.execute(
-            """SELECT product_name, protein, fat, carbohydrates, calories, weight_grams, meal_time
-               FROM meals WHERE user_id = ? AND DATE(meal_time) >= ?
-               ORDER BY meal_time DESC""",
-            (user_id, since)
-        )
-        return [
-            {
-                "product_name": r[0],
-                "protein": r[1],
-                "fat": r[2],
-                "carbohydrates": r[3],
-                "calories": r[4],
-                "weight_grams": r[5],
-                "meal_time": r[6]
-            }
-            for r in cursor.fetchall()
-        ]
-    
-    # ========== НОВЫЕ МЕТОДЫ ДЛЯ АКТИВНОСТИ ==========
-    
-    def get_user_activity(self, days: int = 1) -> list:
-        """Получает статистику активности пользователей за указанное количество дней"""
-        cursor = self.conn.cursor()
-        since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-        cursor.execute(
-            """SELECT 
-                u.user_id, 
-                u.first_name, 
-                u.username,
-                COUNT(m.id) as total_meals,
-                SUM(m.calories) as total_calories,
-                COUNT(DISTINCT DATE(m.meal_time)) as active_days,
-                MIN(m.meal_time) as first_meal,
-                MAX(m.meal_time) as last_meal
-            FROM users u
-            INNER JOIN meals m ON u.user_id = m.user_id
-            WHERE DATE(m.meal_time) >= ?
-            GROUP BY u.user_id
-            ORDER BY total_meals DESC""",
-            (since,)
-        )
-        return [
-            {
-                "user_id": r[0],
-                "first_name": r[1],
-                "username": r[2],
-                "total_meals": r[3],
-                "total_calories": round(r[4] or 0, 1),
-                "active_days": r[5],
-                "first_meal": r[6],
-                "last_meal": r[7]
-            }
-            for r in cursor.fetchall()
-        ]
-    
-    def get_daily_activity(self, date_str: str = None) -> list:
-        """Получает активность за конкретный день (по умолчанию сегодня)"""
-        if not date_str:
-            date_str = datetime.now().strftime("%Y-%m-%d")
-        
-        cursor = self.conn.cursor()
-        cursor.execute(
-            """SELECT 
-                u.user_id, 
-                u.first_name, 
-                u.username,
-                COUNT(m.id) as total_meals,
-                SUM(m.calories) as total_calories,
-                MIN(m.meal_time) as first_meal,
-                MAX(m.meal_time) as last_meal
-            FROM users u
-            INNER JOIN meals m ON u.user_id = m.user_id
-            WHERE DATE(m.meal_time) = ?
-            GROUP BY u.user_id
-            ORDER BY total_meals DESC""",
-            (date_str,)
-        )
-        return [
-            {
-                "user_id": r[0],
-                "first_name": r[1],
-                "username": r[2],
-                "total_meals": r[3],
-                "total_calories": round(r[4] or 0, 1),
-                "first_meal": r[5],
-                "last_meal": r[6]
-            }
-            for r in cursor.fetchall()
-        ]
-    
-    def close(self):
-        self.conn.close()
+           

@@ -58,7 +58,6 @@ def format_daily_stats(stats: dict, tdee: float = None) -> str:
     if tdee and tdee > 0:
         percent = (stats['calories'] / tdee) * 100
         text += f"\nОт суточной нормы: {percent:.0f}% (норма: {tdee:.0f} ккал)"
-    
     return text
 
 def format_subscription_status(subscription: dict) -> str:
@@ -153,14 +152,11 @@ def has_profile(user_id: int) -> bool:
     return user_db.get_profile(user_id) is not None
 
 def is_emoji_name(name: str) -> bool:
-    """Проверяет, состоит ли имя только из эмодзи и пробелов"""
     if not name:
         return False
-    # Убираем пробелы и спецсимволы (Zero Width Joiner, Variation Selector)
     name_clean = name.replace(" ", "").replace("\u200d", "").replace("\ufe0f", "")
     if not name_clean:
         return False
-    # Проверяем, все ли символы — эмодзи (категория So = Symbol, Other)
     return all(unicodedata.category(c).startswith('So') for c in name_clean)
 
 async def get_user_id_or_username(user_input: str) -> int:
@@ -173,25 +169,130 @@ async def get_user_id_or_username(user_input: str) -> int:
 def format_date(date_str: str) -> str:
     if not date_str:
         return date_str
-    parts = date_str[:10].split('-')
+    parts = str(date_str)[:10].split('-')
     if len(parts) == 3:
         return f"{parts[2]}.{parts[1]}.{parts[0]}"
-    return date_str[:10]
+    return str(date_str)[:10]
 
 def format_datetime(dt_str: str) -> str:
-    """Форматирует дату и время из ISO-формата"""
     if not dt_str:
         return ""
     try:
-        parts = dt_str.split()
+        parts = str(dt_str).split()
         if len(parts) >= 2:
             date_part = parts[0].split('-')
             time_part = parts[1].split('+')[0].split('.')[0][:5]
             if len(date_part) == 3:
                 return f"{date_part[2]}.{date_part[1]}.{date_part[0]} {time_part}"
-        return dt_str[:16]
+        return str(dt_str)[:16]
     except:
-        return dt_str[:16]
+        return str(dt_str)[:16]
+
+# ============ ХЕЛПЕРЫ АДМИН-СПИСКА (по ТЗ) ============
+
+def build_users_list_text(users: list) -> str:
+    """Компактный список клиентов с short_id."""
+    text = f"👥 Клиенты ({len(users)})\n\n"
+    for u in users:
+        icon = "✅" if u.get("is_active") else "❌"
+        username_str = f" | @{u['username']}" if u.get("username") else ""
+        name = u.get("first_name") or "Без имени"
+        status = u.get("status_text") or "нет подписки"
+        
+        text += f"{icon} ID {u['short_id']}{username_str}\n"
+        text += f"   {name} | {status}\n\n"
+    
+    text += "Нажмите на ID для управления"
+    return text
+
+def build_users_list_keyboard(users: list) -> InlineKeyboardMarkup:
+    """Кнопки с короткими ID по 4 в ряд."""
+    buttons = []
+    row = []
+    for u in users:
+        row.append(InlineKeyboardButton(
+            text=f"ID {u['short_id']}",
+            callback_data=f"admin_user_{u['short_id']}"
+        ))
+        if len(row) >= 4:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def build_user_card_text(user: dict) -> str:
+    """Карточка клиента."""
+    short_id = user["short_id"]
+    user_id = user["user_id"]
+    
+    is_blocked = user.get("is_blocked", False)
+    
+    # Формируем статус
+    if user.get("is_forever"):
+        status = "✅ оплачено бессрочно"
+    elif user.get("paid_until"):
+        paid = user["paid_until"]
+        from datetime import date as _date
+        try:
+            is_active = _date.fromisoformat(paid) >= _date.today()
+        except Exception:
+            is_active = False
+        status = f"✅ оплачено до {format_date(paid)}" if is_active else f"❌ истекло ({format_date(paid)})"
+    elif user.get("trial_end"):
+        from datetime import date as _date
+        try:
+            is_active = _date.fromisoformat(user["trial_end"]) >= _date.today()
+        except Exception:
+            is_active = False
+        status = f"✅ триал до {format_date(user['trial_end'])}" if is_active else f"❌ триал истёк"
+    else:
+        status = "❌ нет подписки"
+    
+    text = f"👤 Клиент #{short_id}\n\n"
+    text += f"Имя: {user.get('first_name') or 'Не указано'}\n"
+    text += f"Username: @{user.get('username') or 'нет'}\n"
+    text += f"Telegram ID: {user_id}\n"
+    text += f"Зарегистрирован: {format_date(user.get('created_at', ''))}\n"
+    text += f"Статус: {status}\n"
+    text += f"Заблокирован: {'да' if is_blocked else 'нет'}\n"
+    
+    # Активные подписки
+    text += "\nАктивные подписки:\n"
+    if user.get("is_forever"):
+        text += "• Бессрочная"
+    elif user.get("paid_until"):
+        text += f"• Оплата до {format_date(user['paid_until'])}"
+    elif user.get("trial_end"):
+        text += f"• Триал до {format_date(user['trial_end'])}"
+    else:
+        text += "• нет"
+    
+    return text
+
+def build_user_card_keyboard(short_id: int, is_blocked: bool) -> InlineKeyboardMarkup:
+    """Кнопки управления клиентом."""
+    block_btn_text = "✅ Разблокировать" if is_blocked else "🚫 Заблокировать"
+    
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Продлить +30", callback_data=f"admin_extend_{short_id}")],
+        [InlineKeyboardButton(text="❌ Удалить подписку", callback_data=f"admin_remove_sub_{short_id}")],
+        [InlineKeyboardButton(text=block_btn_text, callback_data=f"admin_block_{short_id}")],
+        [InlineKeyboardButton(text="🗑️ Удалить пользователя", callback_data=f"admin_delete_{short_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад к списку", callback_data="admin_list")],
+    ])
+
+def build_delete_confirm_keyboard(short_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"admin_delete_confirm_{short_id}")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data=f"admin_delete_cancel_{short_id}")],
+    ])
+
+def get_users_list_for_admin() -> list:
+    """Возвращает список пользователей для админ-списка."""
+    return user_db.get_all_users_with_short_id()
+
+# ============ ПОКАЗ РЕЗУЛЬТАТА ============
 
 async def show_result(message: types.Message, state: FSMContext, result: dict, source_text: str = None):
     data = result["data"]
@@ -286,7 +387,6 @@ async def cmd_admin_activity(message: types.Message):
     
     parts = message.text.split()
     
-    # Определяем период
     if len(parts) > 1:
         arg = parts[1].lower()
         if arg in ["day", "день", "сутки", "1", "today", "сегодня"]:
@@ -311,14 +411,12 @@ async def cmd_admin_activity(message: types.Message):
         period_name = "за сегодня"
         days = 1
     
-    # Получаем данные
     activity = user_db.get_user_activity(days)
     
     if not activity:
         await message.answer(f"Нет активности {period_name}.")
         return
     
-    # Формируем отчёт
     total_users = len(activity)
     total_meals = sum(a["total_meals"] for a in activity)
     total_calories = sum(a["total_calories"] for a in activity)
@@ -333,7 +431,6 @@ async def cmd_admin_activity(message: types.Message):
         name = a['first_name'] or "Без имени"
         username_str = f" @{a['username']}" if a['username'] else ""
         
-        # Проверяем, не состоит ли имя только из эмодзи
         if is_emoji_name(name):
             if a['username']:
                 display_name = f"@{a['username']}"
@@ -357,7 +454,6 @@ async def cmd_admin_activity(message: types.Message):
         
         text += "\n\n"
     
-    # Если отчёт большой, отправляем частями
     if len(text) > 4000:
         parts_list = [text[i:i+4000] for i in range(0, len(text), 4000)]
         for part in parts_list:
@@ -680,34 +776,257 @@ async def cmd_admin_info(message: types.Message):
     except Exception as e:
         await message.answer(f"Ошибка: {e}")
 
+# ============ НОВЫЙ /admin_users (по ТЗ) ============
+
 @dp.message(Command("admin_users"))
 async def cmd_admin_users(message: types.Message):
     if not is_admin(message.from_user.id, message.from_user.username):
         await message.answer("Нет доступа")
         return
     
-    users = user_db.get_all_users()
+    users = get_users_list_for_admin()
     if not users:
         await message.answer("Нет пользователей")
         return
     
-    text = "Список пользователей:\n\n"
-    for u in users:
-        text += f"ID: {u['user_id']}\n"
-        text += f"Имя: {u['first_name']}\n"
-        if u['username']:
-            text += f"Username: @{u['username']}\n"
-        text += f"Регистрация: {format_date(u['created_at'])}\n"
-        
-        if u.get('is_forever'):
-            text += f"Подписка: бессрочная\n"
-        elif u.get('paid_until'):
-            text += f"Оплачено до: {format_date(u['paid_until'])}\n"
-        elif u.get('trial_end'):
-            text += f"Триал до: {format_date(u['trial_end'])}\n"
-        text += "─" * 20 + "\n"
+    text = build_users_list_text(users)
+    keyboard = build_users_list_keyboard(users)
     
-    await message.answer(text)
+    await message.answer(text, reply_markup=keyboard)
+
+# ============ CALLBACK-ОБРАБОТЧИКИ АДМИН-КАРТОЧЕК ============
+
+@dp.callback_query(lambda c: c.data == "admin_list")
+async def cb_admin_list(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id, callback.from_user.username):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    
+    users = get_users_list_for_admin()
+    if not users:
+        await callback.message.edit_text("Нет пользователей")
+        await callback.answer()
+        return
+    
+    text = build_users_list_text(users)
+    keyboard = build_users_list_keyboard(users)
+    
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard)
+    except Exception:
+        await callback.message.answer(text, reply_markup=keyboard)
+    
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data.startswith("admin_user_"))
+async def cb_admin_user_card(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id, callback.from_user.username):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    
+    short_id = int(callback.data.replace("admin_user_", ""))
+    user = user_db.get_user_by_short_id(short_id)
+    if not user:
+        await callback.answer("Пользователь не найден", show_alert=True)
+        return
+    
+    text = build_user_card_text(user)
+    keyboard = build_user_card_keyboard(short_id, user.get("is_blocked", False))
+    
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard)
+    except Exception:
+        await callback.message.answer(text, reply_markup=keyboard)
+    
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data.startswith("admin_extend_"))
+async def cb_admin_extend(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id, callback.from_user.username):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    
+    short_id = int(callback.data.replace("admin_extend_", ""))
+    user = user_db.get_user_by_short_id(short_id)
+    if not user:
+        await callback.answer("Пользователь не найден", show_alert=True)
+        return
+    
+    user_id = user["user_id"]
+    user_db.extend_subscription(user_id, 30)
+    
+    logger.info(f"[ADMIN] Продлена подписка на 30 дней для user_id={user_id} (short_id={short_id})")
+    
+    # Обновляем карточку
+    user = user_db.get_user_by_short_id(short_id)
+    text = build_user_card_text(user)
+    keyboard = build_user_card_keyboard(short_id, user.get("is_blocked", False))
+    
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard)
+    except Exception:
+        await callback.message.answer(text, reply_markup=keyboard)
+    
+    await callback.answer("✅ Подписка продлена на 30 дней")
+    
+    # Уведомляем пользователя
+    try:
+        await bot.send_message(user_id, "Ваша подписка продлена на 30 дней!")
+    except Exception:
+        pass
+
+@dp.callback_query(lambda c: c.data.startswith("admin_remove_sub_"))
+async def cb_admin_remove_sub(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id, callback.from_user.username):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    
+    short_id = int(callback.data.replace("admin_remove_sub_", ""))
+    user = user_db.get_user_by_short_id(short_id)
+    if not user:
+        await callback.answer("Пользователь не найден", show_alert=True)
+        return
+    
+    user_id = user["user_id"]
+    user_db.remove_subscription(user_id)
+    
+    logger.info(f"[ADMIN] Удалена подписка у user_id={user_id} (short_id={short_id})")
+    
+    user = user_db.get_user_by_short_id(short_id)
+    text = build_user_card_text(user)
+    keyboard = build_user_card_keyboard(short_id, user.get("is_blocked", False))
+    
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard)
+    except Exception:
+        await callback.message.answer(text, reply_markup=keyboard)
+    
+    await callback.answer("❌ Подписка удалена")
+
+@dp.callback_query(lambda c: c.data.startswith("admin_block_"))
+async def cb_admin_block(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id, callback.from_user.username):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    
+    short_id = int(callback.data.replace("admin_block_", ""))
+    user = user_db.get_user_by_short_id(short_id)
+    if not user:
+        await callback.answer("Пользователь не найден", show_alert=True)
+        return
+    
+    user_id = user["user_id"]
+    new_state = user_db.toggle_block_user(user_id)
+    
+    logger.info(f"[ADMIN] Пользователь user_id={user_id} (short_id={short_id}) — is_blocked={new_state}")
+    
+    user = user_db.get_user_by_short_id(short_id)
+    text = build_user_card_text(user)
+    keyboard = build_user_card_keyboard(short_id, user.get("is_blocked", False))
+    
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard)
+    except Exception:
+        await callback.message.answer(text, reply_markup=keyboard)
+    
+    await callback.answer("🚫 Заблокирован" if new_state else "✅ Разблокирован")
+
+@dp.callback_query(lambda c: c.data.startswith("admin_delete_confirm_"))
+async def cb_admin_delete_confirm(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id, callback.from_user.username):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    
+    short_id = int(callback.data.replace("admin_delete_confirm_", ""))
+    user = user_db.get_user_by_short_id(short_id)
+    if not user:
+        await callback.answer("Пользователь не найден", show_alert=True)
+        return
+    
+    user_id = user["user_id"]
+    user_name = user.get("first_name") or f"ID {short_id}"
+    
+    user_db.clear_all_user_data(user_id)
+    logger.info(f"[ADMIN] Удалён пользователь user_id={user_id} (short_id={short_id})")
+    
+    # Возвращаемся к списку
+    users = get_users_list_for_admin()
+    if not users:
+        try:
+            await callback.message.edit_text("👥 Клиенты (0)\n\nНет пользователей")
+        except Exception:
+            await callback.message.answer("👥 Клиенты (0)\n\nНет пользователей")
+    else:
+        text = build_users_list_text(users)
+        keyboard = build_users_list_keyboard(users)
+        try:
+            await callback.message.edit_text(text, reply_markup=keyboard)
+        except Exception:
+            await callback.message.answer(text, reply_markup=keyboard)
+    
+    await callback.answer(f"🗑️ {user_name} удалён")
+
+@dp.callback_query(lambda c: c.data.startswith("admin_delete_cancel_"))
+async def cb_admin_delete_cancel(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id, callback.from_user.username):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    
+    short_id = int(callback.data.replace("admin_delete_cancel_", ""))
+    user = user_db.get_user_by_short_id(short_id)
+    if not user:
+        await callback.answer("Пользователь не найден", show_alert=True)
+        return
+    
+    text = build_user_card_text(user)
+    keyboard = build_user_card_keyboard(short_id, user.get("is_blocked", False))
+    
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard)
+    except Exception:
+        await callback.message.answer(text, reply_markup=keyboard)
+    
+    await callback.answer("Отменено")
+
+@dp.callback_query(lambda c: c.data.startswith("admin_delete_"))
+async def cb_admin_delete(callback: types.CallbackQuery):
+    """Показывает подтверждение удаления. ВАЖНО: этот хендлер должен быть ПОСЛЕ confirm/cancel."""
+    if not is_admin(callback.from_user.id, callback.from_user.username):
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    
+    # Пропускаем, если это confirm или cancel
+    if callback.data.startswith("admin_delete_confirm_") or callback.data.startswith("admin_delete_cancel_"):
+        return
+    
+    short_id = int(callback.data.replace("admin_delete_", ""))
+    user = user_db.get_user_by_short_id(short_id)
+    if not user:
+        await callback.answer("Пользователь не найден", show_alert=True)
+        return
+    
+    user_name = user.get("first_name") or f"ID {short_id}"
+    
+    text = (
+        f"⚠️ Удалить пользователя?\n\n"
+        f"Клиент #{short_id} — {user_name}\n"
+        f"Telegram ID: {user['user_id']}\n\n"
+        f"Это действие необратимо. Будут удалены:\n"
+        f"• профиль\n"
+        f"• подписка\n"
+        f"• все записи питания\n"
+        f"• реферальные связи"
+    )
+    keyboard = build_delete_confirm_keyboard(short_id)
+    
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard)
+    except Exception:
+        await callback.message.answer(text, reply_markup=keyboard)
+    
+    await callback.answer()
+
+# ============ СТАРЫЙ /admin_activate (обратная совместимость) ============
 
 @dp.message(Command("admin_activate"))
 async def cmd_admin_activate(message: types.Message):
@@ -815,6 +1134,9 @@ async def cmd_ref_link_info(message: types.Message):
 
 @dp.message(Command("profile"))
 async def cmd_profile(message: types.Message, state: FSMContext):
+    if user_db.is_user_blocked(message.from_user.id):
+        return
+    
     profile = user_db.get_profile(message.from_user.id)
     
     if profile:
@@ -842,6 +1164,8 @@ async def cmd_profile(message: types.Message, state: FSMContext):
 
 @dp.message(Command("profile_edit"))
 async def cmd_profile_edit(message: types.Message, state: FSMContext):
+    if user_db.is_user_blocked(message.from_user.id):
+        return
     await message.answer("Как вас зовут?")
     await state.set_state(ProfileState.waiting_for_name)
 
@@ -917,6 +1241,10 @@ async def process_profile_activity(callback: types.CallbackQuery, state: FSMCont
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
     
+    # Проверка блокировки
+    if user_db.is_user_blocked(message.from_user.id):
+        return
+    
     args = message.text.split()
     referral_code = None
     if len(args) > 1:
@@ -959,11 +1287,16 @@ async def cmd_start(message: types.Message, state: FSMContext):
 
 @dp.message(Command("subscription"))
 async def cmd_subscription(message: types.Message):
+    if user_db.is_user_blocked(message.from_user.id):
+        return
     subscription = user_db.get_subscription_status(message.from_user.id)
     await message.answer(f"Статус подписки: {format_subscription_status(subscription)}")
 
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
+    if user_db.is_user_blocked(message.from_user.id):
+        return
+    
     help_text = (
         "Помощь:\n\n"
         "/stats — статистика за сегодня\n"
@@ -987,6 +1320,9 @@ async def cmd_help(message: types.Message):
 
 @dp.message(Command("stats"))
 async def cmd_stats(message: types.Message):
+    if user_db.is_user_blocked(message.from_user.id):
+        return
+    
     subscription = user_db.get_subscription_status(message.from_user.id)
     if subscription["days_left"] <= 0 and not subscription["is_active"] and not subscription.get("is_forever"):
         await message.answer(f"Ваш тестовый период истёк.\n\nДля продолжения: {ADMIN_CONTACT}")
@@ -1003,6 +1339,9 @@ async def cmd_stats(message: types.Message):
 
 @dp.message(Command("history"))
 async def cmd_history(message: types.Message):
+    if user_db.is_user_blocked(message.from_user.id):
+        return
+    
     subscription = user_db.get_subscription_status(message.from_user.id)
     if subscription["days_left"] <= 0 and not subscription["is_active"] and not subscription.get("is_forever"):
         await message.answer(f"Ваш тестовый период истёк.\n\nДля продолжения: {ADMIN_CONTACT}")
@@ -1023,6 +1362,9 @@ async def cmd_history(message: types.Message):
 
 @dp.message(Command("clear"))
 async def cmd_clear(message: types.Message):
+    if user_db.is_user_blocked(message.from_user.id):
+        return
+    
     markup = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Да", callback_data="clear_confirm"),
          InlineKeyboardButton(text="Нет", callback_data="clear_cancel")]
@@ -1042,6 +1384,9 @@ async def handle_clear_callback(callback: types.CallbackQuery):
 
 @dp.message(Command("export"))
 async def cmd_export(message: types.Message):
+    if user_db.is_user_blocked(message.from_user.id):
+        return
+    
     user_id = message.from_user.id
     
     parts = message.text.split()
@@ -1109,6 +1454,9 @@ async def handle_confirmation_callback(callback: types.CallbackQuery, state: FSM
 @dp.message(lambda message: message.voice)
 async def handle_voice(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
+    
+    if user_db.is_user_blocked(user_id):
+        return
     
     subscription = user_db.get_subscription_status(user_id)
     if subscription["days_left"] <= 0 and not subscription["is_active"] and not subscription.get("is_forever"):
@@ -1228,6 +1576,10 @@ async def handle_correction(message: types.Message, state: FSMContext):
 async def handle_message(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     
+    # Проверка блокировки — молча игнорируем
+    if user_db.is_user_blocked(user_id):
+        return
+    
     subscription = user_db.get_subscription_status(user_id)
     if subscription["days_left"] <= 0 and not subscription["is_active"] and not subscription.get("is_forever"):
         await message.answer(
@@ -1265,7 +1617,7 @@ async def main():
     report_scheduler = ReportScheduler(bot, user_db, lambda uid: generate_daily_report(uid, user_db))
     await report_scheduler.start()
     
-    print("Бот запущен (v3.2)")
+    print("Бот запущен (v3.3)")
     print(f"Модель: {OPENAI_MODEL}")
     
     try:
