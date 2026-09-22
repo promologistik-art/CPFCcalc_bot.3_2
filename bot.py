@@ -26,6 +26,9 @@ user_db = UserDB()
 
 report_scheduler = None
 
+# ============ ⚙️ ССЫЛКА НА ПРОФАЙЛ КЛИЕНТА ============
+BOT_LINK_USERNAME = "CPFCcalc_bot"
+
 # ============ СОСТОЯНИЯ ============
 
 class ProfileState(StatesGroup):
@@ -188,76 +191,74 @@ def format_datetime(dt_str: str) -> str:
     except:
         return str(dt_str)[:16]
 
-# ============ ХЕЛПЕРЫ АДМИН-СПИСКА (по ТЗ) ============
+def escape_html(text: str) -> str:
+    if text is None:
+        return ""
+    return (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+# ============ ХЕЛПЕРЫ АДМИН-СПИСКА ============
 
 def build_users_list_text(users: list) -> str:
-    """Компактный список клиентов с short_id."""
-    text = f"👥 Клиенты ({len(users)})\n\n"
+    """
+    Компактный список клиентов.
+    ID N — кликабельная ссылка, открывающая профайл клиента.
+    """
+    total = len(users)
+    text = f"👥 Клиенты ({total})\n\n"
+
     for u in users:
         icon = "✅" if u.get("is_active") else "❌"
-        username_str = f" | @{u['username']}" if u.get("username") else ""
-        name = u.get("first_name") or "Без имени"
-        status = u.get("status_text") or "нет подписки"
-        
-        text += f"{icon} ID {u['short_id']}{username_str}\n"
+        short_id = u["short_id"]
+        username_str = f" | @{escape_html(u['username'])}" if u.get("username") else ""
+        name = escape_html(u.get("first_name") or "Без имени")
+        status = escape_html(u.get("status_text") or "нет подписки")
+
+        deep_link = f"https://t.me/{BOT_LINK_USERNAME}?start=user_{short_id}"
+        id_link = f'<a href="{deep_link}">ID {short_id}</a>'
+
+        text += f"{icon} {id_link}{username_str}\n"
         text += f"   {name} | {status}\n\n"
-    
+
     text += "Нажмите на ID для управления"
     return text
 
-def build_users_list_keyboard(users: list) -> InlineKeyboardMarkup:
-    """Кнопки с короткими ID по 4 в ряд."""
-    buttons = []
-    row = []
-    for u in users:
-        row.append(InlineKeyboardButton(
-            text=f"ID {u['short_id']}",
-            callback_data=f"admin_user_{u['short_id']}"
-        ))
-        if len(row) >= 4:
-            buttons.append(row)
-            row = []
-    if row:
-        buttons.append(row)
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
 def build_user_card_text(user: dict) -> str:
-    """Карточка клиента."""
+    """Профайл клиента (HTML-безопасный текст)."""
     short_id = user["short_id"]
     user_id = user["user_id"]
-    
+
     is_blocked = user.get("is_blocked", False)
-    
-    # Формируем статус
+
     if user.get("is_forever"):
         status = "✅ оплачено бессрочно"
     elif user.get("paid_until"):
-        paid = user["paid_until"]
-        from datetime import date as _date
         try:
-            is_active = _date.fromisoformat(paid) >= _date.today()
+            is_active = _date_from_iso(user["paid_until"]) >= _today()
         except Exception:
             is_active = False
-        status = f"✅ оплачено до {format_date(paid)}" if is_active else f"❌ истекло ({format_date(paid)})"
+        status = f"✅ оплачено до {format_date(user['paid_until'])}" if is_active else f"❌ истекло ({format_date(user['paid_until'])})"
     elif user.get("trial_end"):
-        from datetime import date as _date
         try:
-            is_active = _date.fromisoformat(user["trial_end"]) >= _date.today()
+            is_active = _date_from_iso(user["trial_end"]) >= _today()
         except Exception:
             is_active = False
-        status = f"✅ триал до {format_date(user['trial_end'])}" if is_active else f"❌ триал истёк"
+        status = f"✅ триал до {format_date(user['trial_end'])}" if is_active else "❌ триал истёк"
     else:
         status = "❌ нет подписки"
-    
+
     text = f"👤 Клиент #{short_id}\n\n"
-    text += f"Имя: {user.get('first_name') or 'Не указано'}\n"
-    text += f"Username: @{user.get('username') or 'нет'}\n"
+    text += f"Имя: {escape_html(user.get('first_name') or 'Не указано')}\n"
+    text += f"Username: @{escape_html(user.get('username') or 'нет')}\n"
     text += f"Telegram ID: {user_id}\n"
     text += f"Зарегистрирован: {format_date(user.get('created_at', ''))}\n"
     text += f"Статус: {status}\n"
     text += f"Заблокирован: {'да' if is_blocked else 'нет'}\n"
-    
-    # Активные подписки
+
     text += "\nАктивные подписки:\n"
     if user.get("is_forever"):
         text += "• Бессрочная"
@@ -267,13 +268,13 @@ def build_user_card_text(user: dict) -> str:
         text += f"• Триал до {format_date(user['trial_end'])}"
     else:
         text += "• нет"
-    
+
     return text
 
 def build_user_card_keyboard(short_id: int, is_blocked: bool) -> InlineKeyboardMarkup:
     """Кнопки управления клиентом."""
     block_btn_text = "✅ Разблокировать" if is_blocked else "🚫 Заблокировать"
-    
+
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Продлить +30", callback_data=f"admin_extend_{short_id}")],
         [InlineKeyboardButton(text="❌ Удалить подписку", callback_data=f"admin_remove_sub_{short_id}")],
@@ -289,8 +290,15 @@ def build_delete_confirm_keyboard(short_id: int) -> InlineKeyboardMarkup:
     ])
 
 def get_users_list_for_admin() -> list:
-    """Возвращает список пользователей для админ-списка."""
     return user_db.get_all_users_with_short_id()
+
+def _today():
+    from datetime import date as _d
+    return _d.today()
+
+def _date_from_iso(s: str):
+    from datetime import date as _d
+    return _d.fromisoformat(s)
 
 # ============ ПОКАЗ РЕЗУЛЬТАТА ============
 
@@ -298,10 +306,10 @@ async def show_result(message: types.Message, state: FSMContext, result: dict, s
     data = result["data"]
     products = data.get("products", [])
     user_text = result.get("user_text", "")
-    
+
     await state.set_state(WaitingState.waiting_for_correction)
     await state.update_data(original_products=products, original_message=source_text or message.text)
-    
+
     if user_text:
         full_text = user_text + "\n\nЗаписываю?"
     else:
@@ -314,13 +322,13 @@ async def show_result(message: types.Message, state: FSMContext, result: dict, s
             fat = p.get("fat", 0)
             carbs = p.get("carbs", 0)
             lines.append(f"{name} - {weight}г, К {cal:.0f}, Б {prot:.1f}, Ж {fat:.1f}, У {carbs:.1f}")
-        
+
         total = data.get("total", {})
         result_text = "\n".join(lines)
         result_text += f"\n\nИТОГО: {total.get('calories', 0):.0f} ккал | Б: {total.get('protein', 0):.1f}г | Ж: {total.get('fat', 0):.1f}г | У: {total.get('carbs', 0):.1f}г"
         result_text += "\n\nЗаписываю?"
         full_text = result_text
-    
+
     await message.answer(full_text, reply_markup=get_confirmation_keyboard())
 
 # ============ АДМИН-ПАНЕЛЬ ============
@@ -330,7 +338,7 @@ async def cmd_admin_panel(message: types.Message):
     if not is_admin(message.from_user.id, message.from_user.username):
         await message.answer("Нет доступа")
         return
-    
+
     admin_text = (
         "Админ-панель\n\n"
         "/admin_users — список пользователей\n"
@@ -352,7 +360,7 @@ async def cmd_admin_panel(message: types.Message):
         "/ref_stats — статистика по рефералам\n"
         "/ref_link_info код — информация о ссылке"
     )
-    
+
     await message.answer(admin_text)
 
 @dp.message(Command("admin_export"))
@@ -360,16 +368,16 @@ async def cmd_admin_export(message: types.Message):
     if not is_admin(message.from_user.id, message.from_user.username):
         await message.answer("Нет доступа")
         return
-    
+
     users = user_db.get_all_users()
     if not users:
         await message.answer("Нет пользователей для экспорта")
         return
-    
+
     try:
         excel_data = export_users_to_excel(users)
         filename = f"users_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        
+
         await message.answer_document(
             document=types.BufferedInputFile(excel_data, filename=filename),
             caption=f"📊 Экспорт пользователей ({len(users)} записей)"
@@ -384,9 +392,9 @@ async def cmd_admin_activity(message: types.Message):
     if not is_admin(message.from_user.id, message.from_user.username):
         await message.answer("Нет доступа")
         return
-    
+
     parts = message.text.split()
-    
+
     if len(parts) > 1:
         arg = parts[1].lower()
         if arg in ["day", "день", "сутки", "1", "today", "сегодня"]:
@@ -410,27 +418,27 @@ async def cmd_admin_activity(message: types.Message):
     else:
         period_name = "за сегодня"
         days = 1
-    
+
     activity = user_db.get_user_activity(days)
-    
+
     if not activity:
         await message.answer(f"Нет активности {period_name}.")
         return
-    
+
     total_users = len(activity)
     total_meals = sum(a["total_meals"] for a in activity)
     total_calories = sum(a["total_calories"] for a in activity)
-    
+
     text = f"📈 Отчёт по активности {period_name}\n\n"
     text += f"Активных пользователей: {total_users}\n"
     text += f"Всего приёмов пищи: {total_meals}\n"
     text += f"Всего калорий: {total_calories:.0f} ккал\n"
     text += "─" * 25 + "\n\n"
-    
+
     for i, a in enumerate(activity, 1):
         name = a['first_name'] or "Без имени"
         username_str = f" @{a['username']}" if a['username'] else ""
-        
+
         if is_emoji_name(name):
             if a['username']:
                 display_name = f"@{a['username']}"
@@ -441,19 +449,19 @@ async def cmd_admin_activity(message: types.Message):
         else:
             text += f"{i}. {name}{username_str}\n"
             text += f"   ID: {a['user_id']}\n"
-        
+
         text += f"   Запросов: {a['total_meals']} | Калорий: {a['total_calories']:.0f} ккал"
-        
+
         if days > 1:
             text += f" | Дней: {a['active_days']}/{days}"
-        
+
         if a['first_meal']:
             text += f"\n   Первый: {format_datetime(a['first_meal'])}"
         if a['last_meal']:
             text += f" | Последний: {format_datetime(a['last_meal'])}"
-        
+
         text += "\n\n"
-    
+
     if len(text) > 4000:
         parts_list = [text[i:i+4000] for i in range(0, len(text), 4000)]
         for part in parts_list:
@@ -468,18 +476,18 @@ async def cmd_backup(message: types.Message):
     if not is_admin(message.from_user.id, message.from_user.username):
         await message.answer("Нет доступа")
         return
-    
+
     try:
         from config import USER_DB_PATH
-        
+
         with open(USER_DB_PATH, 'rb') as f:
             file_data = f.read()
-        
+
         await message.answer_document(
             document=types.BufferedInputFile(file_data, filename="users.db"),
             caption="Бэкап базы данных users.db"
         )
-        
+
     except Exception as e:
         await message.answer(f"Ошибка при создании бэкапа: {e}")
 
@@ -490,11 +498,11 @@ async def cmd_broadcast_all(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id, message.from_user.username):
         await message.answer("Нет доступа")
         return
-    
+
     text = message.text.replace("/broadcast_all", "").strip()
     if not text and message.reply_to_message and message.reply_to_message.text:
         text = message.reply_to_message.text.strip()
-    
+
     if not text:
         await message.answer(
             "Использование:\n"
@@ -502,10 +510,10 @@ async def cmd_broadcast_all(message: types.Message, state: FSMContext):
             "или ответьте на сообщение командой /broadcast_all"
         )
         return
-    
+
     users = user_db.get_all_user_ids()
     await state.update_data(broadcast_text=text, broadcast_users=users, broadcast_type="всем")
-    
+
     await message.answer(
         f"Подтвердите рассылку.\n\n"
         f"Получателей: {len(users)}\n"
@@ -519,11 +527,11 @@ async def cmd_broadcast_active(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id, message.from_user.username):
         await message.answer("Нет доступа")
         return
-    
+
     text = message.text.replace("/broadcast_active", "").strip()
     if not text and message.reply_to_message and message.reply_to_message.text:
         text = message.reply_to_message.text.strip()
-    
+
     if not text:
         await message.answer(
             "Использование:\n"
@@ -531,10 +539,10 @@ async def cmd_broadcast_active(message: types.Message, state: FSMContext):
             "или ответьте на сообщение командой /broadcast_active"
         )
         return
-    
+
     users = user_db.get_active_user_ids()
     await state.update_data(broadcast_text=text, broadcast_users=users, broadcast_type="активным")
-    
+
     await message.answer(
         f"Подтвердите рассылку.\n\n"
         f"Получателей: {len(users)}\n"
@@ -549,17 +557,17 @@ async def process_broadcast(message: types.Message, state: FSMContext):
         await message.answer("Нет доступа")
         await state.clear()
         return
-    
+
     if is_affirmative(message.text.lower()):
         data = await state.get_data()
         text = data.get("broadcast_text")
         users = data.get("broadcast_users")
-        
+
         await message.answer(f"Начинаю рассылку для {len(users)} пользователей...")
-        
+
         success = 0
         failed = 0
-        
+
         for user_id in users:
             try:
                 await bot.send_message(user_id, text)
@@ -568,7 +576,7 @@ async def process_broadcast(message: types.Message, state: FSMContext):
                 failed += 1
                 logger.error(f"Ошибка отправки {user_id}: {e}")
             await asyncio.sleep(0.05)
-        
+
         await message.answer(
             f"Рассылка завершена.\n"
             f"Успешно: {success}\n"
@@ -586,25 +594,25 @@ async def cmd_admin_add_user(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id, message.from_user.username):
         await message.answer("Нет доступа")
         return
-    
+
     await message.answer("Введите ID пользователя или @username (можно получить из /admin_users)")
     await state.set_state(AdminState.waiting_for_user_id)
 
 @dp.message(AdminState.waiting_for_user_id)
 async def process_admin_user_id(message: types.Message, state: FSMContext):
     user_input = message.text.strip()
-    
+
     if user_input.isdigit():
         user_id = int(user_input)
     else:
         username = user_input.lstrip('@')
         user_id = user_db.get_user_id_by_username(username)
-    
+
     if not user_id:
         await message.answer(f"Пользователь {user_input} не найден.")
         await state.clear()
         return
-    
+
     await state.update_data(user_id=user_id)
     await message.answer(
         f"Найден пользователь ID: {user_id}\n\n"
@@ -620,20 +628,20 @@ async def process_admin_days(message: types.Message, state: FSMContext):
     data = await state.get_data()
     user_id = data.get("user_id")
     choice = message.text.strip()
-    
+
     user_info = user_db.get_user_info(user_id)
     user_name = user_info.get('first_name', f"ID {user_id}") if user_info else f"ID {user_id}"
-    
+
     if choice == "1":
         user_db.activate_forever_subscription(user_id)
         await message.answer(f"Пользователю {user_name} выдана бессрочная подписка!")
         await state.clear()
-        
+
         try:
             await bot.send_message(user_id, "Вам выдана бессрочная подписка!")
         except:
             pass
-            
+
     elif choice == "2":
         await message.answer("Введите количество дней (например: 30)")
         await state.set_state(AdminState.waiting_for_days_value)
@@ -644,22 +652,22 @@ async def process_admin_days(message: types.Message, state: FSMContext):
 async def process_admin_days_value(message: types.Message, state: FSMContext):
     data = await state.get_data()
     user_id = data.get("user_id")
-    
+
     try:
         days = int(message.text.strip())
         user_db.activate_subscription(user_id, days)
-        
+
         user_info = user_db.get_user_info(user_id)
         user_name = user_info.get('first_name', f"ID {user_id}") if user_info else f"ID {user_id}"
-        
+
         await message.answer(f"Пользователю {user_name} выдана подписка на {days} дней!")
         await state.clear()
-        
+
         try:
             await bot.send_message(user_id, f"Вам выдана подписка на {days} дней!")
         except:
             pass
-            
+
     except ValueError:
         await message.answer("Неверное количество дней.")
         await state.clear()
@@ -669,21 +677,21 @@ async def cmd_admin_remove_user(message: types.Message):
     if not is_admin(message.from_user.id, message.from_user.username):
         await message.answer("Нет доступа")
         return
-    
+
     parts = message.text.split()
     if len(parts) < 2:
         await message.answer("Использование: /admin_remove_user user_id или @username")
         return
-    
+
     try:
         user_id = await get_user_id_or_username(parts[1])
         if not user_id:
             await message.answer(f"Пользователь {parts[1]} не найден")
             return
-        
+
         user_info = user_db.get_user_info(user_id)
         user_name = user_info.get('first_name', f"ID {user_id}") if user_info else f"ID {user_id}"
-        
+
         user_db.clear_all_user_data(user_id)
         await message.answer(f"Пользователь {user_name} удалён.")
     except Exception as e:
@@ -694,31 +702,31 @@ async def cmd_admin_extend(message: types.Message):
     if not is_admin(message.from_user.id, message.from_user.username):
         await message.answer("Нет доступа")
         return
-    
+
     parts = message.text.split()
     if len(parts) < 3:
         await message.answer("Использование: /admin_extend user_id или @username days")
         return
-    
+
     try:
         user_id = await get_user_id_or_username(parts[1])
         if not user_id:
             await message.answer(f"Пользователь {parts[1]} не найден")
             return
-        
+
         days = int(parts[2])
         user_db.extend_subscription(user_id, days)
-        
+
         user_info = user_db.get_user_info(user_id)
         user_name = user_info.get('first_name', f"ID {user_id}") if user_info else f"ID {user_id}"
-        
+
         await message.answer(f"Подписка пользователя {user_name} продлена на {days} дней!")
-        
+
         try:
             await bot.send_message(user_id, f"Ваша подписка продлена на {days} дней!")
         except:
             pass
-            
+
     except ValueError:
         await message.answer("Неверное количество дней.")
     except Exception as e:
@@ -729,24 +737,24 @@ async def cmd_admin_info(message: types.Message):
     if not is_admin(message.from_user.id, message.from_user.username):
         await message.answer("Нет доступа")
         return
-    
+
     parts = message.text.split()
     if len(parts) < 2:
         await message.answer("Использование: /admin_info user_id или @username")
         return
-    
+
     try:
         user_id = await get_user_id_or_username(parts[1])
         if not user_id:
             await message.answer(f"Пользователь {parts[1]} не найден")
             return
-        
+
         user_info = user_db.get_user_info(user_id)
-        
+
         if not user_info:
             await message.answer(f"Пользователь {parts[1]} не найден")
             return
-        
+
         text = f"Информация о пользователе {parts[1]} (ID: {user_id})\n\n"
         text += f"Имя: {user_info.get('first_name', 'Не указано')}\n"
         text += f"Username: @{user_info.get('username', 'нет')}\n"
@@ -756,7 +764,7 @@ async def cmd_admin_info(message: types.Message):
         text += f"   Белки: {user_info.get('protein', 0):.1f} г\n"
         text += f"   Жиры: {user_info.get('fat', 0):.1f} г\n"
         text += f"   Углеводы: {user_info.get('carbs', 0):.1f} г\n"
-        
+
         sub = user_info.get('subscription', {})
         if sub.get('is_forever'):
             text += f"Подписка: бессрочная\n"
@@ -764,80 +772,95 @@ async def cmd_admin_info(message: types.Message):
             text += f"Подписка: до {format_date(sub['paid_until'])}\n"
         elif sub.get('trial_end'):
             text += f"Тестовый период: до {format_date(sub['trial_end'])}\n"
-        
+
         ref_stats = user_info.get('referral_stats', {})
         text += f"\nРеферальная статистика:\n"
         text += f"   Привёл: {ref_stats.get('total_refs', 0)} пользователей\n"
         text += f"   Оплатили: {ref_stats.get('paid_refs', 0)}\n"
         text += f"   Сумма к выплате: {ref_stats.get('total_commission', 0):.0f} ₽"
-        
+
         await message.answer(text)
-        
+
     except Exception as e:
         await message.answer(f"Ошибка: {e}")
 
-# ============ НОВЫЙ /admin_users (по ТЗ) ============
+# ============ /admin_users — список с кликабельными ID ============
 
 @dp.message(Command("admin_users"))
 async def cmd_admin_users(message: types.Message):
     if not is_admin(message.from_user.id, message.from_user.username):
         await message.answer("Нет доступа")
         return
-    
+
     users = get_users_list_for_admin()
     if not users:
         await message.answer("Нет пользователей")
         return
-    
-    text = build_users_list_text(users)
-    keyboard = build_users_list_keyboard(users)
-    
-    await message.answer(text, reply_markup=keyboard)
 
-# ============ CALLBACK-ОБРАБОТЧИКИ АДМИН-КАРТОЧЕК ============
+    text = build_users_list_text(users)
+
+    await message.answer(
+        text,
+        parse_mode="HTML",
+        disable_web_page_preview=True
+    )
+
+# ============ CALLBACK: возврат к списку ============
 
 @dp.callback_query(lambda c: c.data == "admin_list")
 async def cb_admin_list(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id, callback.from_user.username):
         await callback.answer("Нет доступа", show_alert=True)
         return
-    
+
     users = get_users_list_for_admin()
     if not users:
-        await callback.message.edit_text("Нет пользователей")
+        try:
+            await callback.message.edit_text("Нет пользователей")
+        except Exception:
+            await callback.message.answer("Нет пользователей")
         await callback.answer()
         return
-    
+
     text = build_users_list_text(users)
-    keyboard = build_users_list_keyboard(users)
-    
+
     try:
-        await callback.message.edit_text(text, reply_markup=keyboard)
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
     except Exception:
-        await callback.message.answer(text, reply_markup=keyboard)
-    
+        await callback.message.answer(
+            text,
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
+
     await callback.answer()
+
+# ============ CALLBACK: действия в профайле ============
 
 @dp.callback_query(lambda c: c.data.startswith("admin_user_"))
 async def cb_admin_user_card(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id, callback.from_user.username):
         await callback.answer("Нет доступа", show_alert=True)
         return
-    
+
     short_id = int(callback.data.replace("admin_user_", ""))
     user = user_db.get_user_by_short_id(short_id)
     if not user:
         await callback.answer("Пользователь не найден", show_alert=True)
         return
-    
+
     text = build_user_card_text(user)
     keyboard = build_user_card_keyboard(short_id, user.get("is_blocked", False))
-    
+
     try:
         await callback.message.edit_text(text, reply_markup=keyboard)
     except Exception:
         await callback.message.answer(text, reply_markup=keyboard)
-    
+
     await callback.answer()
 
 @dp.callback_query(lambda c: c.data.startswith("admin_extend_"))
@@ -845,31 +868,29 @@ async def cb_admin_extend(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id, callback.from_user.username):
         await callback.answer("Нет доступа", show_alert=True)
         return
-    
+
     short_id = int(callback.data.replace("admin_extend_", ""))
     user = user_db.get_user_by_short_id(short_id)
     if not user:
         await callback.answer("Пользователь не найден", show_alert=True)
         return
-    
+
     user_id = user["user_id"]
     user_db.extend_subscription(user_id, 30)
-    
+
     logger.info(f"[ADMIN] Продлена подписка на 30 дней для user_id={user_id} (short_id={short_id})")
-    
-    # Обновляем карточку
+
     user = user_db.get_user_by_short_id(short_id)
     text = build_user_card_text(user)
     keyboard = build_user_card_keyboard(short_id, user.get("is_blocked", False))
-    
+
     try:
         await callback.message.edit_text(text, reply_markup=keyboard)
     except Exception:
         await callback.message.answer(text, reply_markup=keyboard)
-    
+
     await callback.answer("✅ Подписка продлена на 30 дней")
-    
-    # Уведомляем пользователя
+
     try:
         await bot.send_message(user_id, "Ваша подписка продлена на 30 дней!")
     except Exception:
@@ -880,27 +901,27 @@ async def cb_admin_remove_sub(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id, callback.from_user.username):
         await callback.answer("Нет доступа", show_alert=True)
         return
-    
+
     short_id = int(callback.data.replace("admin_remove_sub_", ""))
     user = user_db.get_user_by_short_id(short_id)
     if not user:
         await callback.answer("Пользователь не найден", show_alert=True)
         return
-    
+
     user_id = user["user_id"]
     user_db.remove_subscription(user_id)
-    
+
     logger.info(f"[ADMIN] Удалена подписка у user_id={user_id} (short_id={short_id})")
-    
+
     user = user_db.get_user_by_short_id(short_id)
     text = build_user_card_text(user)
     keyboard = build_user_card_keyboard(short_id, user.get("is_blocked", False))
-    
+
     try:
         await callback.message.edit_text(text, reply_markup=keyboard)
     except Exception:
         await callback.message.answer(text, reply_markup=keyboard)
-    
+
     await callback.answer("❌ Подписка удалена")
 
 @dp.callback_query(lambda c: c.data.startswith("admin_block_"))
@@ -908,27 +929,27 @@ async def cb_admin_block(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id, callback.from_user.username):
         await callback.answer("Нет доступа", show_alert=True)
         return
-    
+
     short_id = int(callback.data.replace("admin_block_", ""))
     user = user_db.get_user_by_short_id(short_id)
     if not user:
         await callback.answer("Пользователь не найден", show_alert=True)
         return
-    
+
     user_id = user["user_id"]
     new_state = user_db.toggle_block_user(user_id)
-    
-    logger.info(f"[ADMIN] Пользователь user_id={user_id} (short_id={short_id}) — is_blocked={new_state}")
-    
+
+    logger.info(f"[ADMIN] user_id={user_id} (short_id={short_id}) — is_blocked={new_state}")
+
     user = user_db.get_user_by_short_id(short_id)
     text = build_user_card_text(user)
     keyboard = build_user_card_keyboard(short_id, user.get("is_blocked", False))
-    
+
     try:
         await callback.message.edit_text(text, reply_markup=keyboard)
     except Exception:
         await callback.message.answer(text, reply_markup=keyboard)
-    
+
     await callback.answer("🚫 Заблокирован" if new_state else "✅ Разблокирован")
 
 @dp.callback_query(lambda c: c.data.startswith("admin_delete_confirm_"))
@@ -936,20 +957,19 @@ async def cb_admin_delete_confirm(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id, callback.from_user.username):
         await callback.answer("Нет доступа", show_alert=True)
         return
-    
+
     short_id = int(callback.data.replace("admin_delete_confirm_", ""))
     user = user_db.get_user_by_short_id(short_id)
     if not user:
         await callback.answer("Пользователь не найден", show_alert=True)
         return
-    
+
     user_id = user["user_id"]
     user_name = user.get("first_name") or f"ID {short_id}"
-    
+
     user_db.clear_all_user_data(user_id)
     logger.info(f"[ADMIN] Удалён пользователь user_id={user_id} (short_id={short_id})")
-    
-    # Возвращаемся к списку
+
     users = get_users_list_for_admin()
     if not users:
         try:
@@ -958,12 +978,19 @@ async def cb_admin_delete_confirm(callback: types.CallbackQuery):
             await callback.message.answer("👥 Клиенты (0)\n\nНет пользователей")
     else:
         text = build_users_list_text(users)
-        keyboard = build_users_list_keyboard(users)
         try:
-            await callback.message.edit_text(text, reply_markup=keyboard)
+            await callback.message.edit_text(
+                text,
+                parse_mode="HTML",
+                disable_web_page_preview=True
+            )
         except Exception:
-            await callback.message.answer(text, reply_markup=keyboard)
-    
+            await callback.message.answer(
+                text,
+                parse_mode="HTML",
+                disable_web_page_preview=True
+            )
+
     await callback.answer(f"🗑️ {user_name} удалён")
 
 @dp.callback_query(lambda c: c.data.startswith("admin_delete_cancel_"))
@@ -971,42 +998,41 @@ async def cb_admin_delete_cancel(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id, callback.from_user.username):
         await callback.answer("Нет доступа", show_alert=True)
         return
-    
+
     short_id = int(callback.data.replace("admin_delete_cancel_", ""))
     user = user_db.get_user_by_short_id(short_id)
     if not user:
         await callback.answer("Пользователь не найден", show_alert=True)
         return
-    
+
     text = build_user_card_text(user)
     keyboard = build_user_card_keyboard(short_id, user.get("is_blocked", False))
-    
+
     try:
         await callback.message.edit_text(text, reply_markup=keyboard)
     except Exception:
         await callback.message.answer(text, reply_markup=keyboard)
-    
+
     await callback.answer("Отменено")
 
 @dp.callback_query(lambda c: c.data.startswith("admin_delete_"))
 async def cb_admin_delete(callback: types.CallbackQuery):
-    """Показывает подтверждение удаления. ВАЖНО: этот хендлер должен быть ПОСЛЕ confirm/cancel."""
+    """Показ подтверждения удаления. Регистрируется ПОСЛЕ confirm/cancel."""
     if not is_admin(callback.from_user.id, callback.from_user.username):
         await callback.answer("Нет доступа", show_alert=True)
         return
-    
-    # Пропускаем, если это confirm или cancel
+
     if callback.data.startswith("admin_delete_confirm_") or callback.data.startswith("admin_delete_cancel_"):
         return
-    
+
     short_id = int(callback.data.replace("admin_delete_", ""))
     user = user_db.get_user_by_short_id(short_id)
     if not user:
         await callback.answer("Пользователь не найден", show_alert=True)
         return
-    
+
     user_name = user.get("first_name") or f"ID {short_id}"
-    
+
     text = (
         f"⚠️ Удалить пользователя?\n\n"
         f"Клиент #{short_id} — {user_name}\n"
@@ -1018,12 +1044,12 @@ async def cb_admin_delete(callback: types.CallbackQuery):
         f"• реферальные связи"
     )
     keyboard = build_delete_confirm_keyboard(short_id)
-    
+
     try:
         await callback.message.edit_text(text, reply_markup=keyboard)
     except Exception:
         await callback.message.answer(text, reply_markup=keyboard)
-    
+
     await callback.answer()
 
 # ============ СТАРЫЙ /admin_activate (обратная совместимость) ============
@@ -1033,31 +1059,31 @@ async def cmd_admin_activate(message: types.Message):
     if not is_admin(message.from_user.id, message.from_user.username):
         await message.answer("Нет доступа")
         return
-    
+
     parts = message.text.split()
     if len(parts) < 2:
         await message.answer("Использование: /admin_activate user_id или @username [days]")
         return
-    
+
     try:
         user_id = await get_user_id_or_username(parts[1])
         if not user_id:
             await message.answer(f"Пользователь {parts[1]} не найден")
             return
-        
+
         days = int(parts[2]) if len(parts) > 2 else 30
         user_db.activate_subscription(user_id, days)
-        
+
         user_info = user_db.get_user_info(user_id)
         user_name = user_info.get('first_name', f"ID {user_id}") if user_info else f"ID {user_id}"
-        
+
         await message.answer(f"Подписка активирована для {user_name} на {days} дней")
-        
+
         try:
             await bot.send_message(user_id, f"Ваша подписка активирована на {days} дней!")
         except:
             pass
-            
+
     except ValueError:
         await message.answer("Неверное количество дней.")
     except Exception as e:
@@ -1070,12 +1096,12 @@ async def cmd_create_referral(message: types.Message):
     if not is_admin(message.from_user.id, message.from_user.username):
         await message.answer("Нет доступа")
         return
-    
+
     parts = message.text.split()
     if len(parts) < 4:
         await message.answer("Использование: /ref @username процент месяцы\n\nПример: /ref @john 50 12")
         return
-    
+
     username = parts[1].lstrip('@')
     try:
         commission_percent = int(parts[2])
@@ -1083,15 +1109,15 @@ async def cmd_create_referral(message: types.Message):
     except ValueError:
         await message.answer("Процент и месяцы должны быть числами")
         return
-    
+
     if commission_percent < 0 or commission_percent > 100:
         await message.answer("Процент должен быть от 0 до 100")
         return
-    
+
     code = user_db.generate_referral_link(username, commission_percent, bonus_months)
     bot_info = await bot.get_me()
     link = f"https://t.me/{bot_info.username}?start={code}"
-    
+
     await message.answer(f"Реферальная ссылка создана для @{username}\n\nСсылка: {link}\n\nКомиссия: {commission_percent}%\nБонус: {bonus_months} мес")
 
 @dp.message(Command("ref_stats"))
@@ -1099,17 +1125,17 @@ async def cmd_ref_stats(message: types.Message):
     if not is_admin(message.from_user.id, message.from_user.username):
         await message.answer("Нет доступа")
         return
-    
+
     stats = user_db.get_referral_stats()
     if not stats:
         await message.answer("Нет реферальных ссылок")
         return
-    
+
     text = "Статистика рефералов:\n\n"
     for i, s in enumerate(stats, 1):
         username = f"@{s['username']}" if s['username'] else s['first_name']
         text += f"{i}. {username} — {s['total_refs']} реф. ({s['paid_refs']} оплат)\n"
-    
+
     await message.answer(text)
 
 @dp.message(Command("ref_link_info"))
@@ -1117,17 +1143,17 @@ async def cmd_ref_link_info(message: types.Message):
     if not is_admin(message.from_user.id, message.from_user.username):
         await message.answer("Нет доступа")
         return
-    
+
     parts = message.text.split()
     if len(parts) < 2:
         await message.answer("Использование: /ref_link_info код_ссылки")
         return
-    
+
     info = user_db.get_referral_link_info(parts[1])
     if not info:
         await message.answer("Ссылка не найдена")
         return
-    
+
     await message.answer(f"Код: {info['code']}\nРеферал: @{info['username']}\nКомиссия: {info['commission_percent']}%\nПереходов: {info['total_refs']}")
 
 # ============ ПРОФИЛЬ ============
@@ -1136,15 +1162,15 @@ async def cmd_ref_link_info(message: types.Message):
 async def cmd_profile(message: types.Message, state: FSMContext):
     if user_db.is_user_blocked(message.from_user.id):
         return
-    
+
     profile = user_db.get_profile(message.from_user.id)
-    
+
     if profile:
         bmr = user_db.calculate_bmr(profile)
         tdee = user_db.calculate_tdee(profile)
         activity_name = ACTIVITY_LEVELS.get(profile["activity_level"], {"name": "Не указано"})["name"]
         gender_text = "Мужской" if profile["gender"] == "male" else "Женский"
-        
+
         await message.answer(
             f"Ваш профиль\n\n"
             f"Имя: {profile['name']}\n"
@@ -1217,12 +1243,12 @@ async def process_profile_gender(callback: types.CallbackQuery, state: FSMContex
 async def process_profile_activity(callback: types.CallbackQuery, state: FSMContext):
     activity_level = callback.data.replace("activity_", "")
     await state.update_data(activity_level=activity_level)
-    
+
     data = await state.get_data()
     user_db.save_profile(callback.from_user.id, data)
-    
+
     tdee = user_db.calculate_tdee(data)
-    
+
     await callback.message.edit_text(
         f"Профиль сохранён!\n\n"
         f"Имя: {data['name']}\n"
@@ -1240,36 +1266,58 @@ async def process_profile_activity(callback: types.CallbackQuery, state: FSMCont
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
-    
-    # Проверка блокировки
+
     if user_db.is_user_blocked(message.from_user.id):
         return
-    
+
     args = message.text.split()
+
+    # === Deep-link на профайл клиента (только для админа) ===
+    if len(args) > 1 and args[1].startswith("user_"):
+        if not is_admin(message.from_user.id, message.from_user.username):
+            await message.answer("Нет доступа")
+            return
+        try:
+            short_id = int(args[1].replace("user_", ""))
+        except ValueError:
+            await message.answer("Неверный ID клиента")
+            return
+
+        user = user_db.get_user_by_short_id(short_id)
+        if not user:
+            await message.answer(f"Клиент ID {short_id} не найден")
+            return
+
+        text = build_user_card_text(user)
+        keyboard = build_user_card_keyboard(short_id, user.get("is_blocked", False))
+        await message.answer(text, reply_markup=keyboard)
+        return
+    # === /Deep-link ===
+
     referral_code = None
     if len(args) > 1:
         referral_code = args[1]
         if not referral_code.startswith('ref_'):
             referral_code = None
-    
+
     user, is_new = user_db.get_or_create_user(
         message.from_user.id,
         message.from_user.username,
         message.from_user.first_name,
         referral_code
     )
-    
+
     if is_new:
         await notify_admin(message.from_user.id, message.from_user.username, message.from_user.first_name)
-        
+
         if referral_code:
             await message.answer("Добро пожаловать!\n\nВы перешли по реферальной ссылке и получили +3 дня к тестовому периоду!")
-    
+
     subscription = user_db.get_subscription_status(message.from_user.id)
     profile = user_db.get_profile(message.from_user.id)
-    
+
     sub_status = format_subscription_status(subscription)
-    
+
     welcome_text = (
         f"🍏 Привет! Я FoodTracker — твой умный дневник питания.\n\n"
         f"🥗 Расскажи, что съел — я посчитаю калории, белки, жиры и углеводы.\n"
@@ -1279,10 +1327,10 @@ async def cmd_start(message: types.Message, state: FSMContext):
         f"📥 Экспорт истории: /export\n\n"
         f"Напиши прямо сейчас, например: «гречка 150г, отварная куриная грудка 150 грамм, салат из огурцов и томатов с оливковым маслом 150 грамм»"
     )
-    
+
     if not profile:
         welcome_text += "\n\n📝 Давай познакомимся! Используй /profile чтобы я подсказывал твою норму."
-    
+
     await message.answer(welcome_text)
 
 @dp.message(Command("subscription"))
@@ -1296,7 +1344,7 @@ async def cmd_subscription(message: types.Message):
 async def cmd_help(message: types.Message):
     if user_db.is_user_blocked(message.from_user.id):
         return
-    
+
     help_text = (
         "Помощь:\n\n"
         "/stats — статистика за сегодня\n"
@@ -1313,40 +1361,40 @@ async def cmd_help(message: types.Message):
         "🎤 Можно отправить голосовое сообщение\n\n"
         f"Связаться с админом: {ADMIN_CONTACT}"
     )
-    
+
     help_text += "\n\n📢 <a href='https://t.me/+MAuGbcnBQmgxZTIy'>Больше наших ботов в канале</a>"
-    
+
     await message.answer(help_text, parse_mode="HTML", disable_web_page_preview=True)
 
 @dp.message(Command("stats"))
 async def cmd_stats(message: types.Message):
     if user_db.is_user_blocked(message.from_user.id):
         return
-    
+
     subscription = user_db.get_subscription_status(message.from_user.id)
     if subscription["days_left"] <= 0 and not subscription["is_active"] and not subscription.get("is_forever"):
         await message.answer(f"Ваш тестовый период истёк.\n\nДля продолжения: {ADMIN_CONTACT}")
         return
-    
+
     stats = user_db.get_today_stats(message.from_user.id)
     profile = user_db.get_profile(message.from_user.id)
     tdee = user_db.calculate_tdee(profile) if profile else None
-    
+
     response = format_daily_stats(stats, tdee)
     response += "\n\n📥 Экспортировать историю: /export"
-    
+
     await message.answer(response)
 
 @dp.message(Command("history"))
 async def cmd_history(message: types.Message):
     if user_db.is_user_blocked(message.from_user.id):
         return
-    
+
     subscription = user_db.get_subscription_status(message.from_user.id)
     if subscription["days_left"] <= 0 and not subscription["is_active"] and not subscription.get("is_forever"):
         await message.answer(f"Ваш тестовый период истёк.\n\nДля продолжения: {ADMIN_CONTACT}")
         return
-    
+
     meals = user_db.get_recent_meals(message.from_user.id, 10)
     if not meals:
         await message.answer("История пуста.")
@@ -1355,16 +1403,16 @@ async def cmd_history(message: types.Message):
     for meal in meals:
         weight = meal.get("weight_grams", 0)
         text += f"{meal['product_name']} - {weight}г — {meal['calories']:.0f} ккал\n"
-    
+
     text += "\n📥 Скачать всё в Excel: /export"
-    
+
     await message.answer(text)
 
 @dp.message(Command("clear"))
 async def cmd_clear(message: types.Message):
     if user_db.is_user_blocked(message.from_user.id):
         return
-    
+
     markup = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Да", callback_data="clear_confirm"),
          InlineKeyboardButton(text="Нет", callback_data="clear_cancel")]
@@ -1386,9 +1434,9 @@ async def handle_clear_callback(callback: types.CallbackQuery):
 async def cmd_export(message: types.Message):
     if user_db.is_user_blocked(message.from_user.id):
         return
-    
+
     user_id = message.from_user.id
-    
+
     parts = message.text.split()
     days = 30
     if len(parts) > 1:
@@ -1396,17 +1444,17 @@ async def cmd_export(message: types.Message):
             days = int(parts[1])
         except ValueError:
             pass
-    
+
     meals = user_db.get_all_user_meals(user_id, days)
-    
+
     if not meals:
         await message.answer(f"Нет записей за последние {days} дней.")
         return
-    
+
     try:
         excel_data = export_user_meals_to_excel(meals, days)
         filename = f"питание_{datetime.now().strftime('%Y%m%d')}.xlsx"
-        
+
         await message.answer_document(
             document=types.BufferedInputFile(excel_data, filename=filename),
             caption=f"📥 Ваш журнал питания за {days} дней ({len(meals)} записей)"
@@ -1421,24 +1469,24 @@ async def handle_confirmation_callback(callback: types.CallbackQuery, state: FSM
     action = callback.data.replace("confirm_", "")
     data = await state.get_data()
     original_products = data.get("original_products", [])
-    
+
     if action == "yes":
         for p in original_products:
             product_data = extract_product_data(p)
             user_db.add_meal(callback.from_user.id, product_data)
-        
+
         stats = user_db.get_today_stats(callback.from_user.id)
         profile = user_db.get_profile(callback.from_user.id)
         tdee = user_db.calculate_tdee(profile) if profile else None
-        
+
         response = f"✅ Сохранено!\n\n{format_daily_stats(stats, tdee)}"
-        
+
         if not has_profile(callback.from_user.id):
             response += "\n\nИспользуйте /profile для настройки нормы."
-        
+
         await callback.message.edit_text(response)
         await state.clear()
-        
+
     else:
         await callback.message.edit_text(
             "❌ Не записано.\n\n"
@@ -1446,7 +1494,7 @@ async def handle_confirmation_callback(callback: types.CallbackQuery, state: FSM
             "борщ 300г\n"
             "удали хлеб"
         )
-    
+
     await callback.answer()
 
 # ============ ГОЛОСОВЫЕ СООБЩЕНИЯ ============
@@ -1454,38 +1502,38 @@ async def handle_confirmation_callback(callback: types.CallbackQuery, state: FSM
 @dp.message(lambda message: message.voice)
 async def handle_voice(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
-    
+
     if user_db.is_user_blocked(user_id):
         return
-    
+
     subscription = user_db.get_subscription_status(user_id)
     if subscription["days_left"] <= 0 and not subscription["is_active"] and not subscription.get("is_forever"):
         await message.answer(f"Ваш тестовый период истёк.\n\nДля продолжения: {ADMIN_CONTACT}")
         return
-    
+
     wait_msg = await message.answer("🎤 Распознаю речь и считаю КБЖУ...")
     await bot.send_chat_action(message.chat.id, "typing")
-    
+
     try:
         file_id = message.voice.file_id
         file = await bot.get_file(file_id)
-        
+
         voice_data = io.BytesIO()
         await bot.download_file(file.file_path, voice_data)
         voice_bytes = voice_data.getvalue()
-        
+
         result = await food_search.parse_voice(
             recognized_text="Распознай речь и посчитай КБЖУ",
             audio_data=voice_bytes
         )
-        
+
         await wait_msg.delete()
-        
+
         if result["success"] and result["data"].get("products"):
             await show_result(message, state, result, "голосовое сообщение")
         else:
             await message.answer("Не удалось обработать голосовое. Попробуйте написать текстом.")
-            
+
     except Exception as e:
         logger.error(f"Ошибка голосового: {e}")
         await wait_msg.delete()
@@ -1497,77 +1545,77 @@ async def handle_voice(message: types.Message, state: FSMContext):
 async def handle_correction(message: types.Message, state: FSMContext):
     if not message.text:
         return
-    
+
     user_text = message.text.strip()
     user_text_lower = user_text.lower()
     data = await state.get_data()
     original_products = data.get("original_products", [])
-    
+
     if is_affirmative(user_text_lower):
         for p in original_products:
             product_data = extract_product_data(p)
             user_db.add_meal(message.from_user.id, product_data)
-        
+
         stats = user_db.get_today_stats(message.from_user.id)
         profile = user_db.get_profile(message.from_user.id)
         tdee = user_db.calculate_tdee(profile) if profile else None
-        
+
         response = f"Сохранено!\n\n{format_daily_stats(stats, tdee)}"
-        
+
         if not has_profile(message.from_user.id):
             response += "\n\nИспользуйте /profile для настройки нормы."
-        
+
         await message.answer(response)
         await state.clear()
         return
-    
+
     if is_negative(user_text_lower) and not is_correction(user_text_lower):
         await message.answer("Напишите правильные данные или 'удали X' для удаления продукта.")
         return
-    
+
     if is_delete_command(user_text_lower):
         words_to_delete = re.findall(r'[\w]+', user_text.replace("удали", "").replace("убрать", "").replace("удалить", ""))
         if words_to_delete:
             to_delete = words_to_delete[0]
             new_products = [p for p in original_products if to_delete not in p.get("name", "").lower()]
-            
+
             if len(new_products) == len(original_products):
                 await message.answer(f"Не найден продукт '{to_delete}' для удаления.")
                 return
-            
+
             total = {"calories": 0, "protein": 0, "fat": 0, "carbs": 0}
             for p in new_products:
                 for key in total:
                     total[key] += p.get(key, 0)
-            
+
             lines = []
             for p in new_products:
                 lines.append(f"{p.get('name', '')} - {p.get('weight_grams', 0)}г, К {p.get('calories', 0):.0f}")
-            
+
             result_text = "Обновлено:\n\n" + "\n".join(lines)
             result_text += f"\n\nИТОГО: {total['calories']:.0f} ккал\n\nЗаписываю?"
-            
+
             await state.update_data(original_products=new_products)
             await message.answer(result_text, reply_markup=get_confirmation_keyboard())
         return
-    
+
     if user_text.startswith('/'):
         await state.clear()
         await handle_message(message, state)
         return
-    
+
     if is_correction(user_text_lower):
         waiting_msg = await message.answer("Пересчитываю...")
         result = await food_search.parse_and_calculate(user_text)
         await waiting_msg.delete()
-        
+
         if result["success"] and result["data"].get("products"):
             await state.update_data(original_products=result["data"]["products"])
             await show_result(message, state, result, user_text)
         else:
             await message.answer("Не удалось распознать. Попробуйте: борщ 300г")
         return
-    
+
     await message.answer("Не понял. Напишите новые данные или нажмите кнопки выше.")
 
 # ============ ОСНОВНОЙ ОБРАБОТЧИК (ТОЛЬКО ТЕКСТ) ============
@@ -1575,11 +1623,10 @@ async def handle_correction(message: types.Message, state: FSMContext):
 @dp.message(lambda message: message.text)
 async def handle_message(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
-    
-    # Проверка блокировки — молча игнорируем
+
     if user_db.is_user_blocked(user_id):
         return
-    
+
     subscription = user_db.get_subscription_status(user_id)
     if subscription["days_left"] <= 0 and not subscription["is_active"] and not subscription.get("is_forever"):
         await message.answer(
@@ -1588,38 +1635,39 @@ async def handle_message(message: types.Message, state: FSMContext):
             f"Свяжитесь с админом: {ADMIN_CONTACT}"
         )
         return
-    
+
     current_state = await state.get_state()
     if current_state == WaitingState.waiting_for_correction.state:
         await handle_correction(message, state)
         return
-    
+
     waiting_msg = await message.answer("Считаю...")
     await bot.send_chat_action(message.chat.id, "typing")
-    
+
     result = await food_search.parse_and_calculate(message.text)
-    
+
     await waiting_msg.delete()
-    
+
     if not result["success"] or not result["data"].get("products"):
         await message.answer("Не удалось обработать. Попробуйте:\nборщ 400г\nяичница 4 яйца\nстакан кефира")
         return
-    
+
     await show_result(message, state, result)
 
 # ============ ЗАПУСК ============
 
 async def main():
     global report_scheduler
-    
+
     await set_bot_commands()
-    
+
     report_scheduler = ReportScheduler(bot, user_db, lambda uid: generate_daily_report(uid, user_db))
     await report_scheduler.start()
-    
-    print("Бот запущен (v3.3)")
+
+    print("Бот запущен (v3.5)")
     print(f"Модель: {OPENAI_MODEL}")
-    
+    print(f"Username бота: @{BOT_LINK_USERNAME}")
+
     try:
         await dp.start_polling(bot)
     finally:
